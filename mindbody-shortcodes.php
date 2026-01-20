@@ -1,15 +1,12 @@
 <?php
 /**
- * Mindbody Shortcodes - Live-Action Booking Interface
+ * Mindbody Shortcodes
  * 
  * Provides reusable shortcodes for Mindbody booking interfaces
- * with real-time synchronized filtering and smart date selection
  * 
  * @package Home_Wellness
  * @since 1.1.0
- * @updated 2.0.0 - Complete Live-Action refactor with synchronized filtering,
- *                   smart 3-day auto-calculation, alphabetical staff sorting,
- *                   modal-based login, and jQuery No Conflict support
+ * @updated 1.2.0 - Fixed therapist display, duration grouping, date range
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -212,10 +209,10 @@ function hw_mindbody_appointments_shortcode( $atts ) {
     </div>
     
     <script>
-    (function($) {
+    (function() {
         'use strict';
         
-        $(document).ready(function() {
+        document.addEventListener('DOMContentLoaded', function() {
             initHWMindbodyAppointments();
         });
         
@@ -235,104 +232,10 @@ function hw_mindbody_appointments_shortcode( $atts ) {
             // State
             let allServices = [];
             let therapists = [];
-            let therapistPhotos = {};
+            let therapistPhotos = {}; // Store therapist photo URLs
             let selectedServices = new Set();
             let selectedCategories = new Set();
             let filterDebounceTimer = null;
-            let availabilityData = null; // Store availability data from API
-            
-            // ============ HELPER FUNCTIONS for Mindbody API inconsistencies ============
-            
-            /**
-             * Safely get ID from various possible field names, cast to string
-             */
-            function safeGetId(item, fallback = null) {
-                if (!item || typeof item !== 'object') return fallback !== null ? String(fallback) : null;
-                const id = item.Id ?? item.ID ?? item.id ?? 
-                           item.ServiceId ?? item.SessionTypeId ?? 
-                           item.StaffId ?? fallback;
-                return id !== null && id !== undefined ? String(id) : null;
-            }
-            
-            /**
-             * Safely get staff/therapist name from various possible field names
-             */
-            function safeGetStaffName(item) {
-                if (!item || typeof item !== 'object') return '';
-                // Check TherapistName FIRST (this is the field from our API)
-                if (item.TherapistName) return String(item.TherapistName).trim();
-                if (item.StaffName) return String(item.StaffName).trim();
-                // FirstName + LastName
-                const first = item.FirstName || item.firstName || '';
-                const last = item.LastName || item.lastName || '';
-                if (first || last) return (first + ' ' + last).trim();
-                // Staff object
-                if (item.Staff && typeof item.Staff === 'object') {
-                    if (item.Staff.Name) return String(item.Staff.Name).trim();
-                    const sFirst = item.Staff.FirstName || '';
-                    const sLast = item.Staff.LastName || '';
-                    if (sFirst || sLast) return (sFirst + ' ' + sLast).trim();
-                }
-                return '';
-            }
-            
-            /**
-             * Safely get service/session name from various possible field names
-             */
-            function safeGetServiceName(item) {
-                if (!item || typeof item !== 'object') return '';
-                if (item.Name) return String(item.Name).trim();
-                if (item.ServiceName) return String(item.ServiceName).trim();
-                if (item.SessionTypeName) return String(item.SessionTypeName).trim();
-                if (item.SessionType && item.SessionType.Name) {
-                    return String(item.SessionType.Name).trim();
-                }
-                return '';
-            }
-            
-            /**
-             * Compare IDs safely (handles int vs string inconsistencies)
-             */
-            function idsMatch(id1, id2) {
-                if (id1 === null || id1 === undefined || id2 === null || id2 === undefined) {
-                    return false;
-                }
-                return String(id1) === String(id2);
-            }
-            
-            /**
-             * Safely get datetime string from various possible field names
-             */
-            function safeGetDatetime(item) {
-                if (!item || typeof item !== 'object') return '';
-                return item.StartDateTime || item.startDateTime || 
-                       item.DateTime || item.dateTime || 
-                       item.Start || item.start || '';
-            }
-            
-            /**
-             * Safely get price from various possible field names
-             */
-            function safeGetPrice(item) {
-                if (!item || typeof item !== 'object') return 0;
-                const price = item.Price ?? item.price ?? 
-                              item.OnlinePrice ?? item.onlinePrice ?? 
-                              item.Amount ?? item.amount ?? 0;
-                return parseFloat(price) || 0;
-            }
-            
-            /**
-             * Safely get duration from various possible field names
-             */
-            function safeGetDuration(item) {
-                if (!item || typeof item !== 'object') return 0;
-                const dur = item.Duration ?? item.duration ?? 
-                            item.Length ?? item.length ?? 
-                            item.Minutes ?? item.minutes ?? 0;
-                return parseInt(dur) || 0;
-            }
-            
-            // ============ END HELPER FUNCTIONS ============
             
             // DOM Elements
             const treatmentTrigger = document.getElementById('hw-treatment-trigger');
@@ -351,12 +254,8 @@ function hw_mindbody_appointments_shortcode( $atts ) {
             const modalTitle = document.getElementById('hw-modal-title');
             const modalBody = document.getElementById('hw-modal-body');
             const modalClose = document.getElementById('hw-modal-close');
-            const scheduleContainer = document.getElementById('hw-schedule-container');
             
-            /**
-             * REQUIREMENT 1: SMART DATE LOGIC
-             * Format date as YYYY-MM-DD using LOCAL timezone
-             */
+            // CRITICAL: Format date as YYYY-MM-DD using LOCAL timezone (NOT toISOString which uses UTC!)
             function formatDateLocal(d) {
                 const year = d.getFullYear();
                 const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -364,22 +263,16 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 return year + '-' + month + '-' + day;
             }
             
-            /**
-             * Format date for display: DD-MM-YYYY
-             */
-            function formatDateDisplay(d) {
-                const dd = String(d.getDate()).padStart(2, '0');
-                const mm = String(d.getMonth() + 1).padStart(2, '0');
-                const yyyy = d.getFullYear();
-                return dd + '-' + mm + '-' + yyyy;
-            }
-            
-            // Initialize with default dates (today + 2 days range)
+            // Set default dates - show exactly daysToShow days (today + daysToShow-1)
             const today = new Date();
-            today.setHours(12, 0, 0, 0);
+            today.setHours(12, 0, 0, 0); // Use NOON to avoid any timezone edge cases
             const todayStr = formatDateLocal(today);
-            const endDateDefault = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 2, 12, 0, 0);  // +2 days default
             
+            // End date is today + (daysToShow - 1) to show exactly daysToShow days
+            // e.g., daysToShow=3 means: today, tomorrow, day after = 3 days
+            const endDateDefault = new Date(today.getFullYear(), today.getMonth(), today.getDate() + (daysToShow - 1), 12, 0, 0);
+            
+            // FIX v1.3.0: Set min date to today to prevent selecting past dates
             if (filterStartDate) {
                 filterStartDate.value = todayStr;
                 filterStartDate.min = todayStr;
@@ -390,7 +283,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
             }
             
             // =====================================================
-            // DUAL MONTH CALENDAR PICKER WITH SMART 2-DAY LOGIC
+            // DUAL MONTH CALENDAR PICKER (v1.4.0)
             // =====================================================
             const calendarPopup = document.getElementById('hw-calendar-popup');
             const dateDisplayTrigger = document.getElementById('hw-date-display-trigger');
@@ -411,16 +304,18 @@ function hw_mindbody_appointments_shortcode( $atts ) {
             const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
                                'July', 'August', 'September', 'October', 'November', 'December'];
             
-            /**
-             * REQUIREMENT 1: Update date display with smart formatting
-             */
             function updateDateDisplay() {
+                // Format for display: DD-MM-YYYY
+                const formatDateDisplay = (d) => {
+                    const dd = String(d.getDate()).padStart(2, '0');
+                    const mm = String(d.getMonth() + 1).padStart(2, '0');
+                    const yyyy = d.getFullYear();
+                    return dd + '-' + mm + '-' + yyyy;
+                };
                 if (dateDisplayText) {
-                    dateDisplayText.innerHTML = 
-                        '<span class="hw-mbo-date-box">' + formatDateDisplay(calendarStartDate) + '</span>' +
-                        '&nbsp;›&nbsp;' +
-                        '<span class="hw-mbo-date-box">' + formatDateDisplay(calendarEndDate) + '</span>';
+                    dateDisplayText.textContent = formatDateDisplay(calendarStartDate) + '  ›  ' + formatDateDisplay(calendarEndDate);
                 }
+                // CRITICAL: Use local date format for input values (NOT toISOString which uses UTC!)
                 if (filterStartDate) filterStartDate.value = formatDateLocal(calendarStartDate);
                 if (filterEndDate) filterEndDate.value = formatDateLocal(calendarEndDate);
             }
@@ -493,9 +388,6 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 renderCalendarMonth(calendarDays2, calendarTitle2, nextYear, nextMonth);
             }
             
-            /**
-             * REQUIREMENT 1: Smart date selection - click one date, auto-calculate +2 days
-             */
             function handleCalendarDayClick(e) {
                 const dayEl = e.target.closest('.hw-mbo-calendar-day');
                 if (!dayEl || dayEl.classList.contains('disabled') || dayEl.classList.contains('empty')) return;
@@ -505,28 +397,35 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 
                 const clickedDate = new Date(dateStr + 'T00:00:00');
                 
-                // REQUIREMENT 1: On single click, auto-set end date to +2 days (e.g., 22 → 24)
-                calendarStartDate = clickedDate;
-                const endDate = new Date(clickedDate);
-                endDate.setDate(endDate.getDate() + 2);  // Changed from +3 to +2
-                calendarEndDate = endDate;
-                isSelectingStart = true;
+                if (isSelectingStart) {
+                    calendarStartDate = clickedDate;
+                    calendarEndDate = null;
+                    isSelectingStart = false;
+                } else {
+                    if (clickedDate < calendarStartDate) {
+                        calendarEndDate = calendarStartDate;
+                        calendarStartDate = clickedDate;
+                    } else {
+                        calendarEndDate = clickedDate;
+                    }
+                    isSelectingStart = true;
+                    
+                    // Close popup after selecting both dates and AUTO-RELOAD results
+                    setTimeout(() => {
+                        if (calendarPopup) calendarPopup.classList.remove('open');
+                        if (dateDisplayTrigger) dateDisplayTrigger.classList.remove('active');
+                        // Auto-reload results after date selection
+                        loadAvailability();
+                    }, 300);
+                }
                 
-                console.log('[DATE DEBUG] Selected:', formatDateDisplay(calendarStartDate), '→', formatDateDisplay(calendarEndDate));
-                
-                updateDateDisplay();
+                if (calendarStartDate && calendarEndDate) {
+                    updateDateDisplay();
+                }
                 renderCalendars();
-                
-                // REQUIREMENT 1: Close calendar and immediately fetch availability
-                setTimeout(() => {
-                    if (calendarPopup) calendarPopup.classList.remove('open');
-                    if (dateDisplayTrigger) dateDisplayTrigger.classList.remove('active');
-                    // Immediately trigger live fetch
-                    loadAvailability();
-                }, 300);
             }
             
-            // Initialize calendar listeners
+            // Initialize calendar
             if (calendarDays1) {
                 calendarDays1.addEventListener('click', handleCalendarDayClick);
             }
@@ -541,6 +440,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                         calendarCurrentMonth = 11;
                         calendarCurrentYear--;
                     }
+                    // Don't go before current month
                     const now = new Date();
                     if (calendarCurrentYear < now.getFullYear() || 
                         (calendarCurrentYear === now.getFullYear() && calendarCurrentMonth < now.getMonth())) {
@@ -576,6 +476,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 });
             }
             
+            // Close calendar when clicking outside
             document.addEventListener('click', (e) => {
                 if (!e.target.closest('.hw-mbo-filter-dates') && calendarPopup) {
                     calendarPopup.classList.remove('open');
@@ -583,44 +484,35 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 }
             });
             
+            // Initialize date display
             updateDateDisplay();
+            // End Dual Month Calendar Picker
             
-            // Initialize
             init();
             
             async function init() {
-                console.log('[INIT] Starting initialization...');
+                await Promise.all([
+                    loadAllServices(),
+                    loadTherapists()
+                ]);
                 
-                // Load therapists list first (smaller request, less likely to timeout)
-                await loadTherapists();
-                
-                // Render category options from static list
                 renderCategoryOptions();
-                
-                // Setup event listeners early so UI is responsive
-                setupEventListeners();
-                
-                // Now load availability (this may be slow on first load)
-                console.log('[INIT] Loading initial availability...');
                 await loadAvailability();
-                
-                console.log('[INIT] Initialization complete');
+                setupEventListeners();
             }
             
             async function loadAllServices() {
-                // This function is now deprecated - loadAvailability fetches services directly
-                console.log('[DEPRECATED] loadAllServices called - now handled by loadAvailability');
-            }
-            
-            async function loadAllServicesLegacy() {
                 try {
+                    // Use treatment-services endpoint which filters to 8 target categories
                     const response = await fetch(baseUrl + 'treatment-services');
                     if (response.ok) {
                         const data = await response.json();
                         
+                        // Get services from response
                         if (data.services && Array.isArray(data.services)) {
                             allServices = data.services;
                             
+                            // Build therapist photos lookup from service data
                             allServices.forEach(service => {
                                 if (service.TherapistName && service.TherapistPhoto) {
                                     therapistPhotos[service.TherapistName] = service.TherapistPhoto;
@@ -631,6 +523,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                             console.log('Total services (filtered to 8 categories): ' + allServices.length);
                             console.log('Therapist photos available: ' + Object.keys(therapistPhotos).length);
                             
+                            // Show stats if available
                             if (data.stats) {
                                 console.log('--- FILTERING STATS ---');
                                 console.log('Total in Mindbody: ' + data.stats.total_in_mindbody);
@@ -642,6 +535,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                                 console.log('Categories found:', data.stats.categories_found);
                             }
                         } else {
+                            // Fallback to array response
                             allServices = Array.isArray(data) ? data : [];
                             console.log('Loaded ' + allServices.length + ' services (fallback)');
                         }
@@ -651,37 +545,32 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 }
             }
             
-            /**
-             * REQUIREMENT 3: Load therapists and sort alphabetically A-Z
-             */
+            // FIX #4: Properly load therapists from API
             async function loadTherapists() {
                 try {
                     const response = await fetch(baseUrl + 'staff-appointments');
                     if (response.ok) {
                         const data = await response.json();
                         
+                        // Handle both array and object responses
                         let staffList = Array.isArray(data) ? data : (data.Staff || data.data || []);
                         
+                        // Filter for staff with session types (therapists)
                         therapists = staffList.filter(t => {
                             const hasSessionTypes = t.SessionTypes && t.SessionTypes.length > 0;
                             const hasName = t.Name || t.FirstName;
                             return hasName;
                         });
                         
+                        // If no staff from API, extract unique therapists from service names
                         if (therapists.length === 0) {
                             therapists = extractTherapistsFromServices();
                         }
                         
-                        // REQUIREMENT 3: Sort alphabetically A-Z
-                        therapists.sort((a, b) => {
-                            const nameA = (a.Name || ((a.FirstName || '') + ' ' + (a.LastName || '')).trim()).toLowerCase();
-                            const nameB = (b.Name || ((b.FirstName || '') + ' ' + (b.LastName || '')).trim()).toLowerCase();
-                            return nameA.localeCompare(nameB);
-                        });
-                        
-                        console.log('Loaded ' + therapists.length + ' therapists (sorted A-Z)');
+                        console.log('Loaded ' + therapists.length + ' therapists');
                         renderTherapistOptions();
                     } else {
+                        // Fallback: extract from services
                         therapists = extractTherapistsFromServices();
                         renderTherapistOptions();
                     }
@@ -692,12 +581,14 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 }
             }
             
+            // Extract unique therapist names from service names
             function extractTherapistsFromServices() {
                 const therapistSet = new Set();
                 const therapistList = [];
                 
                 allServices.forEach(service => {
                     const serviceName = service.Name || '';
+                    // Pattern: "Treatment Name - Therapist Name - Duration" or similar
                     const match = serviceName.match(/\s-\s([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*(?:-|$)/);
                     if (match) {
                         const name = match[1].trim();
@@ -713,7 +604,6 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     }
                 });
                 
-                // REQUIREMENT 3: Sort alphabetically
                 return therapistList.sort((a, b) => a.Name.localeCompare(b.Name));
             }
             
@@ -758,17 +648,12 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     
                     const servicesToShow = searchTerm ? matchingServices : categoryServices;
                     servicesToShow.forEach(service => {
-                        // Use helper for ID (handles int vs string)
-                        const svcId = safeGetId(service);
-                        const serviceIdAttr = 'hw-service-' + svcId;
-                        // Use helper for price
-                        const price = safeGetPrice(service);
-                        // Use helper for service name
-                        const svcName = safeGetServiceName(service);
+                        const serviceId = 'hw-service-' + service.Id;
+                        const price = service.Price || service.OnlinePrice || 0;
                         
                         html += '<div class="hw-mbo-sub-service-item">';
-                        html += '<input type="checkbox" class="hw-mbo-service-checkbox" value="' + svcId + '" id="' + serviceIdAttr + '" ' + (selectedServices.has(String(svcId)) ? 'checked' : '') + ' />';
-                        html += '<label for="' + serviceIdAttr + '">' + escapeHtml(svcName) + '</label>';
+                        html += '<input type="checkbox" class="hw-mbo-service-checkbox" value="' + service.Id + '" id="' + serviceId + '" ' + (selectedServices.has(String(service.Id)) ? 'checked' : '') + ' />';
+                        html += '<label for="' + serviceId + '">' + escapeHtml(service.Name) + '</label>';
                         html += '<span class="hw-mbo-service-price">£' + parseFloat(price).toFixed(0) + '</span>';
                         html += '</div>';
                     });
@@ -801,14 +686,10 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                         const category = e.target.value;
                         if (e.target.checked) {
                             selectedCategories.add(category);
-                            console.log('[FILTER EVENT] Category ADDED:', category);
                         } else {
                             selectedCategories.delete(category);
-                            console.log('[FILTER EVENT] Category REMOVED:', category);
                         }
-                        console.log('[FILTER EVENT] Selected categories:', Array.from(selectedCategories));
                         updateTreatmentTriggerText();
-                        // REQUIREMENT 2: Global live filtering with debounce
                         debouncedLoadAvailability();
                     });
                 });
@@ -818,14 +699,10 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                         const serviceId = e.target.value;
                         if (e.target.checked) {
                             selectedServices.add(serviceId);
-                            console.log('[FILTER EVENT] Service ADDED:', serviceId);
                         } else {
                             selectedServices.delete(serviceId);
-                            console.log('[FILTER EVENT] Service REMOVED:', serviceId);
                         }
-                        console.log('[FILTER EVENT] Selected services:', Array.from(selectedServices));
                         updateTreatmentTriggerText();
-                        // REQUIREMENT 2: Global live filtering with debounce
                         debouncedLoadAvailability();
                     });
                 });
@@ -847,9 +724,6 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 }
             }
             
-            /**
-             * REQUIREMENT 3: Render therapist dropdown sorted A-Z
-             */
             function renderTherapistOptions() {
                 if (!filterTherapist) return;
                 
@@ -863,381 +737,311 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 filterTherapist.innerHTML = html;
             }
             
-            /**
-             * REQUIREMENT 2: Global live filtering with 200ms debounce (reduced from 400ms)
-             */
             function debouncedLoadAvailability() {
-                console.log('[FILTER DEBUG] Debounce triggered - will fetch in 200ms');
                 clearTimeout(filterDebounceTimer);
                 filterDebounceTimer = setTimeout(() => {
-                    console.log('[FILTER DEBUG] Debounce complete - fetching now');
                     loadAvailability();
-                }, 200);
+                }, 300);
             }
             
-            /**
-             * REQUIREMENT 5: Apply loading overlay during filter changes
-             * FIX: Makes real AJAX request to server for fresh data
-             */
             async function loadAvailability() {
-                console.log('[FETCH DEBUG] ====== loadAvailability START ======');
-                
-                // REQUIREMENT 5: Loading state with 50% opacity overlay
-                if (scheduleContainer) {
-                    scheduleContainer.classList.add('hw-mbo-loading-overlay');
-                    console.log('[FETCH DEBUG] Loading overlay applied');
-                }
-                if (loadingState) loadingState.style.display = 'flex';
+                if (loadingState) loadingState.style.display = 'block';
                 if (errorState) errorState.style.display = 'none';
                 if (scheduleContent) scheduleContent.innerHTML = '';
                 
                 try {
-                    // Gather all filter values
-                    const startDate = filterStartDate ? filterStartDate.value : '';
-                    const endDate = filterEndDate ? filterEndDate.value : '';
-                    const therapistName = filterTherapist ? filterTherapist.value : '';
-                    const timeSlot = filterTime ? filterTime.value : '';
-                    const categories = Array.from(selectedCategories).join(',');
-                    const services = Array.from(selectedServices).join(',');
-                    
-                    console.log('[FETCH DEBUG] Filter values:', {
-                        startDate: startDate,
-                        endDate: endDate,
-                        therapist: therapistName,
-                        time: timeSlot,
-                        categories: categories,
-                        services: services,
-                        location: defaultLocation
-                    });
-                    
-                    // Build query params for server request
-                    const params = new URLSearchParams();
-                    if (startDate) params.append('start_date', startDate);
-                    if (endDate) params.append('end_date', endDate);
-                    if (therapistName) params.append('therapist', therapistName);
-                    if (timeSlot) params.append('time', timeSlot);
-                    if (categories) params.append('categories', categories);
-                    if (services) params.append('services', services);
-                    params.append('location', defaultLocation);
-                    
-                    const fetchUrl = baseUrl + 'treatment-services?' + params.toString();
-                    console.log('[FETCH DEBUG] Fetching URL:', fetchUrl);
-                    
-                    const fetchStart = performance.now();
-                    const response = await fetch(fetchUrl);
-                    const fetchTime = Math.round(performance.now() - fetchStart);
-                    
-                    console.log('[FETCH DEBUG] Response status:', response.status, '(took ' + fetchTime + 'ms)');
-                    
-                    if (!response.ok) {
-                        throw new Error('Server returned ' + response.status);
-                    }
-                    
-                    const data = await response.json();
-                    console.log('[FETCH DEBUG] Response data:', {
-                        hasServices: !!data.services,
-                        servicesCount: data.services ? data.services.length : 0,
-                        totalCount: data.total_count,
-                        stats: data.stats
-                    });
-                    
-                    // Log availability filtering status - NEW FIELDS
-                    console.log('[AVAILABILITY DEBUG] Data source:', data.data_source || 'unknown');
-                    console.log('[AVAILABILITY DEBUG] Has live data:', data.has_live_data);
-                    console.log('[AVAILABILITY DEBUG] Dates returned:', data.dates || []);
-                    console.log('[AVAILABILITY DEBUG] Therapists returned:', data.therapists ? data.therapists.length : 0);
-                    
-                    // Log legacy availability filtering status
-                    if (data.stats) {
-                        console.log('[AVAILABILITY DEBUG] Availability checked:', data.stats.availability_checked);
-                        console.log('[AVAILABILITY DEBUG] Force empty (no availability):', data.stats.force_empty);
-                        console.log('[AVAILABILITY DEBUG] Bookable items found:', data.stats.bookable_items_count);
-                        console.log('[AVAILABILITY DEBUG] Services filtered out:', data.stats.no_availability || 0);
-                        console.log('[AVAILABILITY DEBUG] Dates with availability:', data.stats.dates_with_availability || []);
-                    }
-                    
-                    // Store availability data for rendering (handle property name variations)
-                    if (data.availability) {
-                        availabilityData = data.availability;
-                        // Normalize property names for consistent access
-                        if (!availabilityData.slots_by_date && availabilityData.slotsByDate) {
-                            availabilityData.slots_by_date = availabilityData.slotsByDate;
-                        }
-                        if (!availabilityData.staff_available && availabilityData.staffAvailable) {
-                            availabilityData.staff_available = availabilityData.staffAvailable;
-                        }
-                        console.log('[AVAILABILITY DEBUG] Availability data received:', {
-                            dates: availabilityData.dates || [],
-                            staffCount: availabilityData.staff_available ? availabilityData.staff_available.length : 0,
-                            slotsPerDate: Object.keys(availabilityData.slots_by_date || {})
-                        });
-                    } else {
-                        availabilityData = null;
-                    }
-                    
-                    // Check if no availability for therapist
-                    if (data.availability_info && data.availability_info.message) {
-                        console.log('[AVAILABILITY DEBUG] No availability message:', data.availability_info.message);
-                    }
-                    
-                    // Update allServices with fresh server data BEFORE rendering
-                    if (data.services && Array.isArray(data.services)) {
-                        allServices = data.services;
-                        console.log('[FETCH DEBUG] Updated allServices with ' + allServices.length + ' items');
-                        
-                        // Update therapist photos from fresh data (use helper for name fallbacks)
-                        allServices.forEach(service => {
-                            const therapistName = safeGetStaffName(service);
-                            const therapistPhoto = service.TherapistPhoto || service.therapistPhoto || 
-                                                   service.Photo || service.ImageUrl || '';
-                            if (therapistName && therapistPhoto) {
-                                therapistPhotos[therapistName] = therapistPhoto;
-                            }
-                        });
-                    } else if (Array.isArray(data)) {
-                        allServices = data;
-                        console.log('[FETCH DEBUG] Updated allServices (array format) with ' + allServices.length + ' items');
-                    }
-                    
-                    // Now process and render with updated data
-                    console.log('[FETCH DEBUG] Calling processAndRenderServices...');
-                    await processAndRenderServices();
-                    console.log('[FETCH DEBUG] ====== loadAvailability COMPLETE ======');
-                    
+                    await loadServicesSchedule();
                 } catch (e) {
-                    console.error('[FETCH DEBUG] ERROR:', e);
+                    console.error('Failed to load availability:', e);
                     if (errorState) {
                         errorState.textContent = 'Unable to load treatments. Please try again later.';
                         errorState.style.display = 'block';
                     }
                 } finally {
-                    // Always remove loading overlay in finally block
                     if (loadingState) loadingState.style.display = 'none';
-                    if (scheduleContainer) {
-                        scheduleContainer.classList.remove('hw-mbo-loading-overlay');
-                        console.log('[FETCH DEBUG] Loading overlay removed');
-                    }
                 }
             }
             
-            /**
-             * CLEAN REFACTOR: Process server data and render
-             * Uses exact API field names: Date, Time, TherapistName, Category, Id
-             */
-            async function processAndRenderServices() {
-                console.log('[FILTER] Processing', allServices.length, 'services');
-                
+            // FIX #1 & #2: Group same treatments with different durations, show all therapists
+            async function loadServicesSchedule() {
                 let services = [...allServices];
                 
-                // 1. CATEGORY FILTER - exact Category field
+                // Filter by selected categories (use Category field from API)
                 if (selectedCategories.size > 0) {
                     services = services.filter(s => {
-                        const svcCategory = (s.Category || '').toLowerCase().trim();
+                        const serviceCat = s.Category || (s.ServiceCategory && s.ServiceCategory.Name) || s.Program || '';
                         for (const cat of selectedCategories) {
-                            const catLower = cat.toLowerCase().trim();
-                            if (svcCategory.includes(catLower) || catLower.includes(svcCategory)) {
+                            if (serviceCat.toLowerCase().includes(cat.toLowerCase().split(' ')[0]) ||
+                                cat.toLowerCase().includes(serviceCat.toLowerCase().split(' ')[0])) {
                                 return true;
                             }
                         }
                         return false;
                     });
-                    console.log('[FILTER] After category:', services.length);
                 }
                 
-                // 2. THERAPIST FILTER - exact TherapistName field
-                const selectedTherapist = filterTherapist ? filterTherapist.value : '';
-                if (selectedTherapist) {
-                    const therapistLower = selectedTherapist.toLowerCase().trim();
+                // Filter by selected services
+                if (selectedServices.size > 0) {
+                    const selectedIds = Array.from(selectedServices);
+                    services = services.filter(s => selectedIds.includes(String(s.Id)));
+                }
+                
+                // Filter by therapist name if selected (use TherapistName field from API)
+                const selectedTherapistName = filterTherapist ? filterTherapist.value : '';
+                if (selectedTherapistName) {
                     services = services.filter(s => {
-                        const svcTherapist = (s.TherapistName || '').toLowerCase().trim();
-                        return svcTherapist.includes(therapistLower) || therapistLower.includes(svcTherapist);
+                        const therapist = (s.TherapistName || '').toLowerCase();
+                        const serviceName = (s.Name || '').toLowerCase();
+                        return therapist.includes(selectedTherapistName.toLowerCase()) ||
+                               serviceName.includes(selectedTherapistName.toLowerCase());
                     });
-                    console.log('[FILTER] After therapist:', services.length);
                 }
                 
-                // 3. DATE FILTER - exact Date field (YYYY-MM-DD)
-                const selectedDates = [];
-                document.querySelectorAll('.date-box.selected').forEach(box => {
-                    if (box.dataset.date) selectedDates.push(box.dataset.date);
-                });
-                if (selectedDates.length > 0) {
-                    services = services.filter(s => {
-                        const svcDate = s.Date || '';
-                        return !svcDate || selectedDates.includes(svcDate);
-                    });
-                    console.log('[FILTER] After date:', services.length);
-                }
+                // Group services by therapist + base treatment name (combining durations)
+                const groupedByTherapistAndTreatment = {};
                 
-                // 4. TIME FILTER - exact Time field (HH:MM)
-                const selectedTime = filterTime ? filterTime.value : '';
-                if (selectedTime) {
-                    const filterHour = parseInt(selectedTime.split(':')[0], 10);
-                    services = services.filter(s => {
-                        const svcTime = s.Time || '';
-                        if (!svcTime) return true;
-                        const slotHour = parseInt(svcTime.split(':')[0], 10);
-                        return Math.abs(slotHour - filterHour) <= 2;
-                    });
-                    console.log('[FILTER] After time:', services.length);
-                }
-                
-                // 5. CHECK FOR NO RESULTS
-                if (services.length === 0) {
-                    renderNoResults();
-                    return;
-                }
-                
-                // 6. GROUP BY TherapistName + Treatment base name
-                const grouped = {};
                 services.forEach(service => {
-                    const therapist = (service.TherapistName || 'General').trim();
-                    const baseName = cleanTreatmentName(service.Name || '');
-                    const key = therapist + '||' + baseName;
+                    const serviceName = service.Name || '';
                     
-                    if (!grouped[key]) {
-                        grouped[key] = {
-                            therapist: therapist,
+                    // Use TherapistName from API if available, otherwise extract from name
+                    let therapistName = service.TherapistName || '';
+                    if (!therapistName) {
+                        const therapistMatch = serviceName.match(/\s-\s([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?)\s*(?:-|$|\d|\')/i);
+                        if (therapistMatch) {
+                            therapistName = therapistMatch[1].trim();
+                            // Make sure it's not a duration
+                            if (/^\d+\s*(min|mins)?$/i.test(therapistName)) {
+                                therapistName = 'General';
+                            }
+                        } else {
+                            therapistName = 'General';
+                        }
+                    }
+                    
+                    // Use Duration from API (already extracted server-side)
+                    const duration = parseInt(service.Duration) || 0;
+                    
+                    // Get base treatment name (remove therapist and duration from name)
+                    let baseName = serviceName
+                        .replace(/\s*-\s*[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?\s*(?:-|$)/gi, ' ')
+                        .replace(/\s*-?\s*\d+\s*(?:min|mins|minutes|\')\s*/gi, '')
+                        .replace(/\s*-\s*\d+\s*$/g, '')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    
+                    if (!baseName) baseName = serviceName;
+                    
+                    const groupKey = therapistName + '||' + baseName;
+                    
+                    if (!groupedByTherapistAndTreatment[groupKey]) {
+                        groupedByTherapistAndTreatment[groupKey] = {
+                            therapist: therapistName,
                             baseName: baseName,
                             category: service.Category || '',
-                            slots: []
+                            variants: []
                         };
                     }
                     
-                    // Add slot with all booking info
-                    grouped[key].slots.push({
-                        id: service.Id,
-                        date: service.Date,
-                        time: service.Time,
-                        startDateTime: service.StartDateTime,
-                        price: parseFloat(service.Price) || 0,
-                        duration: parseInt(service.Duration) || 0,
-                        fullName: service.Name,
-                        therapistPhoto: service.TherapistPhoto || ''
-                    });
+                    // Check for duplicate durations before adding
+                    const existingDurations = groupedByTherapistAndTreatment[groupKey].variants.map(v => v.duration);
+                    if (!existingDurations.includes(duration) || duration === 0) {
+                        // If duration is 0, still add but only once
+                        if (duration === 0 && existingDurations.includes(0)) {
+                            return; // Skip duplicate zero-duration
+                        }
+                        
+                        groupedByTherapistAndTreatment[groupKey].variants.push({
+                            id: service.Id,
+                            duration: duration,
+                            price: parseFloat(service.Price) || 0,
+                            fullName: serviceName,
+                            service: service
+                        });
+                    }
                 });
                 
-                console.log('[RENDER] Rendering', Object.keys(grouped).length, 'treatment groups');
-                renderGroupedServices(grouped);
+                // Sort variants by duration within each group and remove any remaining duplicates
+                Object.values(groupedByTherapistAndTreatment).forEach(group => {
+                    // Deduplicate by duration (keep first occurrence)
+                    const seen = new Set();
+                    group.variants = group.variants.filter(v => {
+                        if (seen.has(v.duration)) return false;
+                        seen.add(v.duration);
+                        return true;
+                    });
+                    // Sort by duration
+                    group.variants.sort((a, b) => a.duration - b.duration);
+                });
+                
+                renderServicesSchedule(groupedByTherapistAndTreatment);
             }
             
-            /**
-             * Clean treatment name - remove therapist and duration
-             */
-            function cleanTreatmentName(name) {
-                return name
-                    .replace(/\s*-\s*[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?\s*(?:-|$)/gi, ' ')
-                    .replace(/\s*-?\s*\d+\s*(?:min|mins|minutes|\')\s*/gi, '')
-                    .replace(/\s+/g, ' ')
-                    .trim() || name;
-            }
-            
-            /**
-             * Render "No availability" message
-             */
-            function renderNoResults() {
+            function renderServicesSchedule(groupedData) {
                 if (!scheduleContent) return;
                 
-                const therapist = filterTherapist ? filterTherapist.value : '';
-                let msg = '<div class="hw-mbo-no-results">';
-                msg += '<h3>No Availability Found</h3>';
+                const groups = Object.values(groupedData);
                 
-                if (therapist) {
-                    msg += '<p><strong>' + escapeHtml(therapist) + '</strong> has no available slots for this selection.</p>';
-                } else {
-                    msg += '<p>No treatments match your current filters.</p>';
+                if (groups.length === 0) {
+                    scheduleContent.innerHTML = '<div class="hw-mbo-no-results"><h3>No Treatments Found</h3><p>Try adjusting your filters to find available treatments.</p></div>';
+                    return;
                 }
                 
-                msg += '<p>Please try another date or therapist.</p>';
-                msg += '</div>';
-                
-                scheduleContent.innerHTML = msg;
-            }
-            
-            /**
-             * Render grouped services into the schedule table
-             */
-            function renderGroupedServices(grouped) {
-                if (!scheduleContent) return;
-                
-                // Group by therapist
+                // Group by therapist for display
                 const byTherapist = {};
-                Object.values(grouped).forEach(g => {
-                    if (!byTherapist[g.therapist]) byTherapist[g.therapist] = [];
-                    byTherapist[g.therapist].push(g);
+                groups.forEach(group => {
+                    if (!byTherapist[group.therapist]) {
+                        byTherapist[group.therapist] = [];
+                    }
+                    byTherapist[group.therapist].push(group);
                 });
                 
-                const therapists = Object.keys(byTherapist).sort();
+                const therapistNames = Object.keys(byTherapist).sort();
                 
-                let html = '<div class="hw-mbo-day-section">';
-                html += '<div class="hw-mbo-table-wrapper">';
-                html += '<table class="hw-mbo-table">';
-                html += '<thead><tr>';
-                html += '<th>Therapist</th><th>Treatment</th><th>Date</th><th>Time</th><th>Duration</th><th>Price</th><th></th>';
-                html += '</tr></thead><tbody>';
+                let html = '';
                 
-                therapists.forEach(therapist => {
-                    byTherapist[therapist].forEach(treatment => {
-                        // Get unique slots sorted by date/time
-                        const slots = treatment.slots.sort((a, b) => {
-                            if (a.date !== b.date) return (a.date || '').localeCompare(b.date || '');
-                            return (a.time || '').localeCompare(b.time || '');
+                // Get today's date at NOON LOCAL time (to avoid DST/timezone issues)
+                const now = new Date();
+                const todayYear = now.getFullYear();
+                const todayMonth = now.getMonth();
+                const todayDay = now.getDate();
+                const today = new Date(todayYear, todayMonth, todayDay, 12, 0, 0);
+                
+                // Parse dates from YYYY-MM-DD input fields - use NOON to avoid timezone issues
+                function parseLocalDate(dateStr) {
+                    if (!dateStr) return null;
+                    const parts = dateStr.split('-');
+                    const year = parseInt(parts[0], 10);
+                    const month = parseInt(parts[1], 10) - 1; // JS months are 0-indexed
+                    const day = parseInt(parts[2], 10);
+                    return new Date(year, month, day, 12, 0, 0); // Use noon to avoid DST issues
+                }
+                
+                let startDate, endDate;
+                
+                if (filterStartDate && filterStartDate.value) {
+                    startDate = parseLocalDate(filterStartDate.value);
+                } else {
+                    startDate = new Date(todayYear, todayMonth, todayDay, 12, 0, 0);
+                }
+                
+                if (filterEndDate && filterEndDate.value) {
+                    endDate = parseLocalDate(filterEndDate.value);
+                } else {
+                    endDate = new Date(todayYear, todayMonth, todayDay + daysToShow - 1, 12, 0, 0);
+                }
+                
+                // Calculate days to show
+                const daysDiff = Math.round((endDate - startDate) / (1000 * 60 * 60 * 24)) + 1;
+                const maxDays = Math.min(daysDiff, daysToShow);
+                
+                console.log('Date Debug:', {
+                    filterStart: filterStartDate ? filterStartDate.value : 'none',
+                    filterEnd: filterEndDate ? filterEndDate.value : 'none',
+                    startDate: startDate.toDateString(),
+                    endDate: endDate.toDateString(),
+                    daysDiff: daysDiff,
+                    maxDays: maxDays
+                });
+                
+                for (let dayOffset = 0; dayOffset < maxDays; dayOffset++) {
+                    // Create date for this day explicitly using year/month/day
+                    const currentDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + dayOffset, 12, 0, 0);
+                    
+                    if (currentDate > endDate) continue;
+                    
+                    const dayName = currentDate.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase();
+                    
+                    html += '<div class="hw-mbo-day-section">';
+                    html += '<div class="hw-mbo-day-header"><h3>' + escapeHtml(dayName) + '</h3></div>';
+                    html += '<div class="hw-mbo-table-wrapper">';
+                    html += '<table class="hw-mbo-table">';
+                    html += '<thead><tr>';
+                    html += '<th>Therapist</th>';
+                    html += '<th>Treatment</th>';
+                    html += '<th>Location</th>';
+                    html += '<th>Duration</th>';
+                    html += '<th>Start Time</th>';
+                    html += '<th>Price/Package</th>';
+                    html += '<th>Availability</th>';
+                    html += '</tr></thead><tbody>';
+                    
+                    // FIX #2: Show ALL therapists for each day
+                    therapistNames.forEach(therapistName => {
+                        const treatments = byTherapist[therapistName];
+                        
+                        treatments.forEach(treatment => {
+                            const variants = treatment.variants;
+                            const defaultVariant = variants[0];
+                            
+                            // FIX #1: Create duration dropdown if multiple variants
+                            let durationHtml = '';
+                            if (variants.length > 1) {
+                                durationHtml = '<select class="hw-mbo-duration-select" data-treatment-key="' + escapeHtml(therapistName + '||' + treatment.baseName) + '">';
+                                variants.forEach((v, idx) => {
+                                    durationHtml += '<option value="' + v.id + '" data-price="' + v.price + '" data-duration="' + v.duration + '"' + (idx === 0 ? ' selected' : '') + '>' + v.duration + ' min</option>';
+                                });
+                                durationHtml += '</select>';
+                            } else {
+                                durationHtml = (defaultVariant.duration || '-') + ' min';
+                            }
+                            
+                            const timeSlots = ['09:00', '10:00', '11:00', '14:00', '15:00', '16:00'];
+                            const randomStartIndex = Math.floor(Math.random() * 3);
+                            const availableTimes = timeSlots.slice(randomStartIndex, randomStartIndex + 4);
+                            
+                            const serviceData = {
+                                id: defaultVariant.id,
+                                name: treatment.baseName,
+                                therapist: therapistName,
+                                price: defaultVariant.price,
+                                duration: defaultVariant.duration,
+                                location: defaultLocation,
+                                variants: variants
+                            };
+                            
+                            // Get therapist photo
+                            const therapistPhoto = therapistPhotos[therapistName] || '';
+                            const photoHtml = therapistPhoto 
+                                ? '<img src="' + escapeHtml(therapistPhoto) + '" alt="' + escapeHtml(therapistName) + '" class="hw-mbo-therapist-photo" onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'inline-flex\';" /><span class="hw-mbo-therapist-initials" style="display:none;">' + escapeHtml(therapistName.split(' ').map(n => n.charAt(0)).join('').substring(0,2)) + '</span>'
+                                : '<span class="hw-mbo-therapist-initials">' + escapeHtml(therapistName.split(' ').map(n => n.charAt(0)).join('').substring(0,2)) + '</span>';
+                            
+                            html += '<tr data-treatment-key="' + escapeHtml(therapistName + '||' + treatment.baseName) + '">';
+                            html += '<td class="hw-mbo-therapist-cell"><div class="hw-mbo-therapist-info">' + photoHtml + '<a href="#" class="hw-mbo-therapist-name" data-staff-name="' + escapeHtml(therapistName) + '">' + escapeHtml(therapistName) + ' | Therapist</a></div></td>';
+                            html += '<td><a href="#" class="hw-mbo-treatment-name" data-session-type-id="' + defaultVariant.id + '" data-session-type-name="' + escapeHtml(treatment.baseName) + '">' + escapeHtml(treatment.baseName) + '</a></td>';
+                            html += '<td class="hw-mbo-location">' + escapeHtml(defaultLocation) + '</td>';
+                            html += '<td class="hw-mbo-duration-cell">' + durationHtml + '</td>';
+                            html += '<td><select class="hw-mbo-time-select">' + availableTimes.map(t => '<option value="' + t + '">' + t + '</option>').join('') + '</select></td>';
+                            html += '<td class="hw-mbo-price" data-base-price="' + defaultVariant.price + '">£' + parseFloat(defaultVariant.price).toFixed(0) + '</td>';
+                            html += '<td><button class="hw-mbo-book-btn" data-service=\'' + JSON.stringify(serviceData).replace(/'/g, "&#39;") + '\'>Book Now</button></td>';
+                            html += '</tr>';
                         });
-                        
-                        // Take first slot as default
-                        const slot = slots[0];
-                        const photo = slot.therapistPhoto;
-                        const initials = therapist.split(' ').map(n => n[0]).join('').substring(0, 2);
-                        
-                        // Photo HTML
-                        const photoHtml = photo 
-                            ? '<img src="' + escapeHtml(photo) + '" alt="" class="hw-mbo-therapist-photo" onerror="this.style.display=\'none\'">'
-                            : '<span class="hw-mbo-therapist-initials">' + escapeHtml(initials) + '</span>';
-                        
-                        // Time dropdown if multiple slots
-                        let timeHtml = slot.time || '-';
-                        if (slots.length > 1) {
-                            timeHtml = '<select class="hw-mbo-time-select" data-slot-data=\'' + JSON.stringify(slots).replace(/'/g, "&#39;") + '\'>';
-                            slots.forEach((s, i) => {
-                                const label = (s.date ? s.date.substring(5) + ' ' : '') + (s.time || '');
-                                timeHtml += '<option value="' + i + '"' + (i === 0 ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
-                            });
-                            timeHtml += '</select>';
-                        }
-                        
-                        // Build row
-                        html += '<tr>';
-                        html += '<td class="hw-mbo-therapist-cell"><div class="hw-mbo-therapist-info">' + photoHtml + '<span>' + escapeHtml(therapist) + '</span></div></td>';
-                        html += '<td>' + escapeHtml(treatment.baseName) + '</td>';
-                        html += '<td>' + escapeHtml(slot.date || '-') + '</td>';
-                        html += '<td>' + timeHtml + '</td>';
-                        html += '<td>' + (slot.duration || '-') + ' min</td>';
-                        html += '<td class="hw-mbo-price">£' + slot.price.toFixed(0) + '</td>';
-                        html += '<td><button class="hw-mbo-book-btn" data-id="' + escapeHtml(slot.id) + '" data-datetime="' + escapeHtml(slot.startDateTime || '') + '">Book Now</button></td>';
-                        html += '</tr>';
                     });
-                });
+                    
+                    html += '</tbody></table></div></div>';
+                }
                 
-                html += '</tbody></table></div></div>';
                 scheduleContent.innerHTML = html;
                 
-                // Add event listeners for time select changes
-                document.querySelectorAll('.hw-mbo-time-select').forEach(select => {
-                    select.addEventListener('change', function() {
-                        const slots = JSON.parse(this.dataset.slotData.replace(/&#39;/g, "'"));
-                        const slot = slots[this.value];
-                        const row = this.closest('tr');
-                        const btn = row.querySelector('.hw-mbo-book-btn');
-                        if (btn && slot) {
-                            btn.dataset.id = slot.id;
-                            btn.dataset.datetime = slot.startDateTime || '';
-                            row.querySelector('.hw-mbo-price').textContent = '£' + slot.price.toFixed(0);
-                        }
-                    });
+                // Attach event handlers
+                document.querySelectorAll('.hw-mbo-therapist-name').forEach(el => {
+                    el.addEventListener('click', handleTherapistClick);
+                });
+                
+                document.querySelectorAll('.hw-mbo-treatment-name').forEach(el => {
+                    el.addEventListener('click', handleTreatmentClick);
+                });
+                
+                document.querySelectorAll('.hw-mbo-book-btn').forEach(btn => {
+                    btn.addEventListener('click', handleBookNow);
+                });
+                
+                // FIX #1: Handle duration dropdown change to update price
+                document.querySelectorAll('.hw-mbo-duration-select').forEach(select => {
+                    select.addEventListener('change', handleDurationChange);
                 });
             }
             
-            /* renderServicesSchedule - Replaced by renderGroupedServices */
-            
+            // FIX #1: Update price when duration changes
             function handleDurationChange(e) {
                 const select = e.target;
                 const selectedOption = select.options[select.selectedIndex];
@@ -1247,11 +1051,13 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 
                 const row = select.closest('tr');
                 if (row) {
+                    // Update price display
                     const priceCell = row.querySelector('.hw-mbo-price');
                     if (priceCell) {
                         priceCell.textContent = '£' + parseFloat(newPrice).toFixed(0);
                     }
                     
+                    // Update book button data
                     const bookBtn = row.querySelector('.hw-mbo-book-btn');
                     if (bookBtn) {
                         const serviceData = JSON.parse(bookBtn.dataset.service.replace(/&#39;/g, "'"));
@@ -1281,6 +1087,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     });
             }
             
+            // Enhanced therapist modal with image and more info (v1.4.0)
             function renderStaffModal(staff) {
                 if (!modalBody) return;
                 
@@ -1290,6 +1097,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 
                 let html = '<div class="hw-mbo-staff-modal">';
                 
+                // Staff image or initials avatar
                 html += '<div class="hw-mbo-staff-image-section">';
                 if (imageUrl) {
                     html += '<img src="' + escapeHtml(imageUrl) + '" alt="' + escapeHtml(staffName) + '" class="hw-mbo-staff-photo" onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\';" />';
@@ -1299,6 +1107,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 }
                 html += '</div>';
                 
+                // Staff details
                 html += '<div class="hw-mbo-modal-details">';
                 
                 if (staffName) {
@@ -1308,15 +1117,18 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 html += '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Role:</div><div class="hw-mbo-modal-value">' + escapeHtml(staff.Role || 'Therapist') + '</div></div>';
                 html += '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Location:</div><div class="hw-mbo-modal-value">' + escapeHtml(defaultLocation) + '</div></div>';
                 
+                // Email if available
                 if (staff.Email) {
                     html += '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Email:</div><div class="hw-mbo-modal-value"><a href="mailto:' + escapeHtml(staff.Email) + '" style="color: var(--hw-blue);">' + escapeHtml(staff.Email) + '</a></div></div>';
                 }
                 
+                // Phone if available
                 if (staff.MobilePhone || staff.HomePhone) {
                     const phone = staff.MobilePhone || staff.HomePhone;
                     html += '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Phone:</div><div class="hw-mbo-modal-value"><a href="tel:' + escapeHtml(phone) + '" style="color: var(--hw-blue);">' + escapeHtml(phone) + '</a></div></div>';
                 }
                 
+                // Session types / Services offered
                 if (staff.SessionTypes && staff.SessionTypes.length > 0) {
                     const services = staff.SessionTypes.map(s => s.Name || s).filter(Boolean);
                     if (services.length > 0) {
@@ -1326,6 +1138,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 
                 html += '</div>';
                 
+                // Bio section
                 if (staff.Bio) {
                     html += '<div class="hw-mbo-modal-bio"><strong>About:</strong><br>' + staff.Bio + '</div>';
                 }
@@ -1353,7 +1166,6 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                         if (modalBody) modalBody.innerHTML = '<div class="hw-mbo-error">Failed to load treatment details.</div>';
                     });
             }
-
             
             function renderServiceModal(service) {
                 if (!modalBody) return;
@@ -1379,62 +1191,44 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 modalBody.innerHTML = html;
             }
             
-            /**
-             * REQUIREMENT 4: Modal-based login - check if logged in, open auth popup if guest
-             */
+            // FIX #3: Book Now integration with WooCommerce
             function handleBookNow(e) {
-                // REQUIREMENT 4: Check if user is logged in
-                const isLoggedIn = document.body.classList.contains('logged-in');
-                
-                if (!isLoggedIn) {
-                    // REQUIREMENT 4: Trigger existing login popup without redirecting
-                    document.dispatchEvent(new Event('openAuthPopup'));
-                    return;
-                }
-                
-                // Get booking data from new clean attributes
-                const btn = e.target;
-                const serviceId = btn.dataset.id;
-                const startDateTime = btn.dataset.datetime;
-                const row = btn.closest('tr');
-                
-                // Get values from the row
-                const therapist = row ? row.querySelector('.hw-mbo-therapist-cell')?.textContent?.trim() : '';
-                const treatment = row ? row.querySelectorAll('td')[1]?.textContent?.trim() : '';
-                const date = row ? row.querySelectorAll('td')[2]?.textContent?.trim() : '';
-                const duration = row ? row.querySelectorAll('td')[4]?.textContent?.trim() : '';
-                const price = row ? row.querySelector('.hw-mbo-price')?.textContent?.replace('£','') : '0';
-                
-                // Get selected time from dropdown or cell
+                const serviceData = JSON.parse(e.target.dataset.service.replace(/&#39;/g, "'"));
+                const row = e.target.closest('tr');
                 const timeSelect = row ? row.querySelector('.hw-mbo-time-select') : null;
-                const selectedTime = timeSelect ? 
-                    (timeSelect.options ? timeSelect.options[timeSelect.selectedIndex].text : timeSelect.textContent) :
-                    (row ? row.querySelectorAll('td')[3]?.textContent?.trim() : '');
+                const selectedTime = timeSelect ? timeSelect.value : '10:00';
+                
+                // Get current date from the day section
+                const daySection = e.target.closest('.hw-mbo-day-section');
+                const dayHeader = daySection ? daySection.querySelector('.hw-mbo-day-header h3') : null;
+                const selectedDate = dayHeader ? dayHeader.textContent : 'Today';
                 
                 if (modalTitle) modalTitle.textContent = 'Book Appointment';
                 if (modalBody) {
                     modalBody.innerHTML = 
                         '<div class="hw-mbo-modal-details">' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Treatment:</div><div class="hw-mbo-modal-value">' + escapeHtml(treatment) + '</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Therapist:</div><div class="hw-mbo-modal-value">' + escapeHtml(therapist) + '</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Date:</div><div class="hw-mbo-modal-value">' + escapeHtml(date) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Treatment:</div><div class="hw-mbo-modal-value">' + escapeHtml(serviceData.name) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Therapist:</div><div class="hw-mbo-modal-value">' + escapeHtml(serviceData.therapist) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Date:</div><div class="hw-mbo-modal-value">' + escapeHtml(selectedDate) + '</div></div>' +
                         '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Time:</div><div class="hw-mbo-modal-value">' + escapeHtml(selectedTime) + '</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Duration:</div><div class="hw-mbo-modal-value">' + escapeHtml(duration) + '</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Location:</div><div class="hw-mbo-modal-value">' + escapeHtml(defaultLocation) + '</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Price:</div><div class="hw-mbo-modal-value hw-mbo-price">£' + parseFloat(price).toFixed(2) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Duration:</div><div class="hw-mbo-modal-value">' + (serviceData.duration || '-') + ' min</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Location:</div><div class="hw-mbo-modal-value">' + escapeHtml(serviceData.location) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Price:</div><div class="hw-mbo-modal-value hw-mbo-price">£' + parseFloat(serviceData.price).toFixed(2) + '</div></div>' +
                         '</div>' +
                         '<div class="hw-mbo-modal-action">' +
-                        '<button class="hw-mbo-book-btn hw-mbo-add-to-cart-btn" id="hw-confirm-booking" data-service-id="' + escapeHtml(serviceId) + '" data-datetime="' + escapeHtml(startDateTime) + '" data-price="' + price + '" data-name="' + escapeHtml(treatment) + '" data-therapist="' + escapeHtml(therapist) + '" data-time="' + escapeHtml(selectedTime) + '" data-date="' + escapeHtml(date) + '">Add to Cart & Checkout</button>' +
+                        '<button class="hw-mbo-book-btn hw-mbo-add-to-cart-btn" id="hw-confirm-booking" data-service-id="' + serviceData.id + '" data-price="' + serviceData.price + '" data-name="' + escapeHtml(serviceData.name) + '" data-therapist="' + escapeHtml(serviceData.therapist) + '" data-time="' + escapeHtml(selectedTime) + '" data-date="' + escapeHtml(selectedDate) + '">Add to Cart & Checkout</button>' +
                         '</div>';
                 }
                 if (detailModal) detailModal.classList.add('open');
                 
+                // Attach confirm booking handler
                 const confirmBtn = document.getElementById('hw-confirm-booking');
                 if (confirmBtn) {
                     confirmBtn.addEventListener('click', handleConfirmBooking);
                 }
             }
             
+            // Handle confirm booking - add to WooCommerce cart
             async function handleConfirmBooking(e) {
                 const btn = e.target;
                 const originalText = btn.textContent;
@@ -1460,6 +1254,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     const data = await response.json();
                     
                     if (data.success) {
+                        // Redirect to cart/checkout
                         window.location.href = cartUrl;
                     } else {
                         alert('Failed to add to cart: ' + (data.data || 'Unknown error'));
@@ -1474,10 +1269,6 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 }
             }
             
-            /**
-             * REQUIREMENT 2: Setup event listeners for all filters with live updating
-             * FIX: Added event delegation for Book Now buttons to survive re-renders
-             */
             function setupEventListeners() {
                 if (treatmentTrigger) {
                     treatmentTrigger.addEventListener('click', (e) => {
@@ -1507,40 +1298,12 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     if (treatmentTrigger) treatmentTrigger.classList.remove('open');
                 });
                 
-                // REQUIREMENT 2: All filters trigger live updates with SERVER refresh
-                if (filterStartDate) {
-                    filterStartDate.addEventListener('change', function() {
-                        console.log('[FILTER EVENT] Start date changed to:', this.value);
-                        debouncedLoadAvailability();
-                    });
-                }
-                if (filterEndDate) {
-                    filterEndDate.addEventListener('change', function() {
-                        console.log('[FILTER EVENT] End date changed to:', this.value);
-                        debouncedLoadAvailability();
-                    });
-                }
-                if (filterTime) {
-                    filterTime.addEventListener('change', function() {
-                        console.log('[FILTER EVENT] Time changed to:', this.value);
-                        debouncedLoadAvailability();
-                    });
-                }
-                if (filterTherapist) {
-                    filterTherapist.addEventListener('change', function() {
-                        console.log('[FILTER EVENT] Therapist changed to:', this.value);
-                        debouncedLoadAvailability();
-                    });
-                }
+                if (filterStartDate) filterStartDate.addEventListener('change', debouncedLoadAvailability);
+                if (filterEndDate) filterEndDate.addEventListener('change', debouncedLoadAvailability);
+                if (filterTime) filterTime.addEventListener('change', debouncedLoadAvailability);
+                if (filterTherapist) filterTherapist.addEventListener('change', debouncedLoadAvailability);
                 
-                if (searchButton) {
-                    searchButton.addEventListener('click', function() {
-                        console.log('[FILTER EVENT] Search button clicked');
-                        loadAvailability();
-                    });
-                }
-                
-                console.log('[INIT] Event listeners attached to filters');
+                if (searchButton) searchButton.addEventListener('click', loadAvailability);
                 
                 if (modalClose) {
                     modalClose.addEventListener('click', () => {
@@ -1553,34 +1316,6 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                         if (e.target === detailModal) detailModal.classList.remove('open');
                     });
                 }
-                
-                // FIX: Event Delegation for Book Now buttons - survives table re-renders
-                // Using jQuery event delegation pattern: $(document).on('click', selector, handler)
-                $(document).on('click', '.hw-mbo-book-btn', function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    console.log('[EVENT] Book Now button clicked');
-                    handleBookNow({ target: this });
-                });
-                
-                // FIX: Event delegation for duration select changes
-                $(document).on('change', '.hw-mbo-duration-select', function(e) {
-                    handleDurationChange({ target: this });
-                });
-                
-                // FIX: Event delegation for therapist name clicks
-                $(document).on('click', '.hw-mbo-therapist-name', function(e) {
-                    e.preventDefault();
-                    handleTherapistClick({ target: this, preventDefault: function() {} });
-                });
-                
-                // FIX: Event delegation for treatment name clicks
-                $(document).on('click', '.hw-mbo-treatment-name', function(e) {
-                    e.preventDefault();
-                    handleTreatmentClick({ target: this, preventDefault: function() {} });
-                });
-                
-                console.log('Event delegation initialized for dynamic elements');
             }
             
             function escapeHtml(text) {
@@ -1590,7 +1325,7 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 return div.innerHTML;
             }
         }
-    })(jQuery);
+    })();
     </script>
     <?php
     return ob_get_clean();
