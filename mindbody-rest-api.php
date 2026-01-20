@@ -828,13 +828,13 @@ function hw_mindbody_rest_test_connection( $request ) {
 }
 
 /**
- * REST: Get treatment services filtered to 8 target categories with therapist photos
+ * REST: Get treatment services with live bookable time slots
  * 
- * STRICT FILTERING:
- * - Only 8 target treatment categories
- * - Only bookable online services
- * - No duplicates
- * - Proper duration extraction
+ * NEW ARCHITECTURE:
+ * - Calls Mindbody GET /appointment/bookableitems for LIVE availability
+ * - Returns Date, Time, TherapistName, StartDateTime for each slot
+ * - Supports dynamic date range filtering from frontend
+ * - Filters to 8 target treatment categories only
  * 
  * @param WP_REST_Request $request Request object.
  * @return WP_REST_Response|WP_Error
@@ -846,7 +846,7 @@ function hw_mindbody_rest_get_treatment_services( $request ) {
         return new WP_Error( 'not_configured', 'Mindbody API is not configured.', array( 'status' => 500 ) );
     }
     
-    // The 8 target treatment categories - STRICT MATCH
+    // The 8 target treatment categories
     $target_categories = array(
         'Acupuncture & Eastern Med',
         'Energy & Healing Therapies',
@@ -858,192 +858,143 @@ function hw_mindbody_rest_get_treatment_services( $request ) {
         'Osteopathy & Physiotherapy',
     );
     
-    // Normalize category names for matching
-    $normalized_targets = array_map( function( $cat ) {
-        return strtolower( trim( $cat ) );
-    }, $target_categories );
+    // Get date range from request (DYNAMIC FETCHING)
+    $start_date = $request->get_param( 'start_date' ) ?: gmdate( 'Y-m-d' );
+    $end_date = $request->get_param( 'end_date' ) ?: gmdate( 'Y-m-d', strtotime( '+7 days' ) );
     
-    // Get all services
-    $all_services = $api->get_services( array( 'Limit' => 1000 ) );
+    // Validate and format dates (ISO format YYYY-MM-DD)
+    $start_date = gmdate( 'Y-m-d', strtotime( $start_date ) );
+    $end_date = gmdate( 'Y-m-d', strtotime( $end_date ) );
     
-    if ( is_wp_error( $all_services ) ) {
-        return $all_services;
+    // STEP 1: Get session types for appointments
+    $session_types = $api->get_session_types( array( 'Limit' => 500 ) );
+    $session_type_ids = array();
+    $session_type_map = array(); // Map ID to session type data
+    
+    if ( ! is_wp_error( $session_types ) && is_array( $session_types ) ) {
+        foreach ( $session_types as $st ) {
+            $id = $st['Id'] ?? null;
+            $type = strtolower( $st['Type'] ?? '' );
+            $name = $st['Name'] ?? '';
+            
+            if ( $id && ( $type === 'appointment' || strpos( $type, 'appointment' ) !== false ) ) {
+                $session_type_ids[] = $id;
+                $session_type_map[ $id ] = $st;
+            }
+        }
     }
     
-    // Get staff with photos
+    // STEP 2: Get all services to extract category mappings
+    $all_services = $api->get_services( array( 'Limit' => 1000 ) );
+    $service_category_map = array(); // SessionTypeId => Category
+    
+    if ( ! is_wp_error( $all_services ) && is_array( $all_services ) ) {
+        foreach ( $all_services as $service ) {
+            $session_id = $service['Id'] ?? null;
+            $category = $service['ServiceCategory']['Name'] ?? $service['Program'] ?? '';
+            
+            if ( $session_id && $category ) {
+                // Check if category matches our target categories
+                foreach ( $target_categories as $target ) {
+                    if ( stripos( $category, $target ) !== false || stripos( $target, $category ) !== false ) {
+                        $service_category_map[ $session_id ] = $target;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    // STEP 3: Get staff with photos
     $staff = $api->get_staff( array( 'Limit' => 500 ) );
-    $staff_photos = array();
-    $staff_data = array();
+    $staff_map = array(); // StaffId => Staff data
     
     if ( ! is_wp_error( $staff ) && is_array( $staff ) ) {
         foreach ( $staff as $s ) {
-            $first_name = $s['FirstName'] ?? '';
-            $last_name  = $s['LastName'] ?? '';
-            $full_name  = trim( $first_name . ' ' . $last_name );
-            $image_url  = $s['ImageUrl'] ?? '';
-            
-            // Store full staff data
-            if ( $full_name ) {
-                $staff_data[ $full_name ] = $s;
-            }
-            
-            if ( $full_name && $image_url ) {
-                $staff_photos[ $full_name ] = $image_url;
-                // Also store by first name for matching
-                if ( $first_name ) {
-                    $staff_photos[ $first_name ] = $image_url;
-                }
+            $staff_id = $s['Id'] ?? null;
+            if ( $staff_id ) {
+                $staff_map[ $staff_id ] = array(
+                    'Name' => trim( ( $s['FirstName'] ?? '' ) . ' ' . ( $s['LastName'] ?? '' ) ),
+                    'ImageUrl' => $s['ImageUrl'] ?? '',
+                    'FirstName' => $s['FirstName'] ?? '',
+                    'LastName' => $s['LastName'] ?? '',
+                );
             }
         }
     }
     
-    // Filter services to target categories
-    $filtered_services = array();
-    $seen_services = array(); // Track duplicates by unique key
-    $stats = array(
-        'total_in_mindbody'    => count( $all_services ),
-        'not_bookable_online'  => 0,
-        'wrong_category'       => 0,
-        'no_duration'          => 0,
-        'duplicates_removed'   => 0,
-        'final_count'          => 0,
-        'categories_found'     => array(),
-    );
+    // STEP 4: Get bookable items - THE LIVE DATA!
+    $bookable_slots = array();
     
-    foreach ( $all_services as $service ) {
-        // Get category
-        $category = '';
-        if ( isset( $service['ServiceCategory']['Name'] ) ) {
-            $category = $service['ServiceCategory']['Name'];
-        } elseif ( isset( $service['Program'] ) ) {
-            $category = $service['Program'];
-        }
-        
-        $normalized_category = strtolower( trim( $category ) );
-        
-        // STRICT category matching - must match one of 8 target categories
-        $matched_category = null;
-        foreach ( $target_categories as $idx => $target ) {
-            $normalized_target = $normalized_targets[ $idx ];
-            
-            // Exact match or close match
-            if ( $normalized_category === $normalized_target ||
-                 strpos( $normalized_category, $normalized_target ) !== false ||
-                 strpos( $normalized_target, $normalized_category ) !== false ) {
-                $matched_category = $target;
-                break;
-            }
-        }
-        
-        if ( ! $matched_category ) {
-            $stats['wrong_category']++;
-            continue;
-        }
-        
-        // Track categories found
-        if ( ! isset( $stats['categories_found'][ $matched_category ] ) ) {
-            $stats['categories_found'][ $matched_category ] = 0;
-        }
-        $stats['categories_found'][ $matched_category ]++;
-        
-        // Check if bookable online - skip if explicitly set to false
-        $bookable_online = $service['AllowOnlineBooking'] ?? $service['OnlineBooking'] ?? true;
-        if ( $bookable_online === false ) {
-            $stats['not_bookable_online']++;
-            continue;
-        }
-        
-        // Extract duration from service data or name
-        $duration = 0;
-        
-        // First try from service object fields
-        if ( isset( $service['Duration'] ) && $service['Duration'] > 0 ) {
-            $duration = intval( $service['Duration'] );
-        } elseif ( isset( $service['Length'] ) && $service['Length'] > 0 ) {
-            $duration = intval( $service['Length'] );
-        } elseif ( isset( $service['SessionLength'] ) && $service['SessionLength'] > 0 ) {
-            $duration = intval( $service['SessionLength'] );
-        }
-        
-        // If still no duration, extract from service name
-        if ( $duration === 0 ) {
-            $service_name = $service['Name'] ?? '';
-            
-            // Try multiple patterns: "60min", "60'", "60 min", "- 60min", etc.
-            if ( preg_match( '/(\d+)\s*(?:min|mins|minutes|\')/i', $service_name, $matches ) ) {
-                $duration = intval( $matches[1] );
-            } elseif ( preg_match( '/-\s*(\d+)\s*$/', $service_name, $matches ) ) {
-                // Pattern: "Service Name - 60"
-                $duration = intval( $matches[1] );
-            }
-        }
-        
-        // Skip services without valid duration
-        if ( $duration <= 0 ) {
-            $stats['no_duration']++;
-            // Don't skip - still include but with 0 duration
-        }
-        
-        // Extract therapist name from service name
-        $service_name = $service['Name'] ?? '';
-        $therapist_name = '';
-        $therapist_photo = '';
-        
-        // Pattern: "Service Name - Therapist Name - Duration" or "Service Name - Therapist Name"
-        if ( preg_match( '/\s-\s([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?)\s*(?:-|$|\d|\')/i', $service_name, $matches ) ) {
-            $therapist_name = trim( $matches[1] );
-            // Make sure it's not a duration pattern
-            if ( preg_match( '/^\d+\s*(min|mins|minutes)?$/i', $therapist_name ) ) {
-                $therapist_name = '';
-            }
-        }
-        
-        // Look up therapist photo
-        if ( $therapist_name ) {
-            if ( isset( $staff_photos[ $therapist_name ] ) ) {
-                $therapist_photo = $staff_photos[ $therapist_name ];
-            } else {
-                // Try first name only
-                $first_name = explode( ' ', $therapist_name )[0];
-                if ( isset( $staff_photos[ $first_name ] ) ) {
-                    $therapist_photo = $staff_photos[ $first_name ];
-                }
-            }
-        }
-        
-        // Create unique key to prevent duplicates
-        $unique_key = $service['Id'] ?? md5( $service_name . $therapist_name . $duration );
-        
-        if ( isset( $seen_services[ $unique_key ] ) ) {
-            $stats['duplicates_removed']++;
-            continue;
-        }
-        $seen_services[ $unique_key ] = true;
-        
-        // Build clean service object
-        $clean_service = array(
-            'Id'              => $service['Id'] ?? null,
-            'Name'            => $service_name,
-            'Price'           => floatval( $service['Price'] ?? $service['OnlinePrice'] ?? 0 ),
-            'Duration'        => $duration,
-            'Category'        => $matched_category,
-            'TherapistName'   => $therapist_name,
-            'TherapistPhoto'  => $therapist_photo,
-            'BookableOnline'  => true,
-            'OriginalData'    => $service, // Keep original for reference
+    if ( ! empty( $session_type_ids ) ) {
+        $bookable_params = array(
+            'SessionTypeIds' => array_slice( $session_type_ids, 0, 10 ), // Limit to 10 to avoid API timeout
+            'StartDate' => $start_date,
+            'EndDate' => $end_date,
+            'Limit' => 1000,
         );
         
-        $filtered_services[] = $clean_service;
+        $bookable_response = $api->get_bookable_items( $bookable_params );
+        
+        if ( ! is_wp_error( $bookable_response ) && is_array( $bookable_response ) ) {
+            foreach ( $bookable_response as $item ) {
+                $session_type_id = $item['SessionType']['Id'] ?? null;
+                $staff_id = $item['Staff']['Id'] ?? null;
+                $start_datetime = $item['StartDateTime'] ?? null;
+                
+                if ( ! $session_type_id || ! $start_datetime ) {
+                    continue;
+                }
+                
+                // Check if this session type is in our target categories
+                $category = $service_category_map[ $session_type_id ] ?? null;
+                if ( ! $category ) {
+                    continue;
+                }
+                
+                // Extract date and time
+                $datetime_obj = new DateTime( $start_datetime );
+                $date = $datetime_obj->format( 'Y-m-d' );
+                $time = $datetime_obj->format( 'H:i' );
+                
+                // Get staff info
+                $staff_info = $staff_map[ $staff_id ] ?? null;
+                $therapist_name = $staff_info ? $staff_info['Name'] : 'Unknown';
+                $therapist_photo = $staff_info ? $staff_info['ImageUrl'] : '';
+                
+                // Get session type info
+                $session_info = $session_type_map[ $session_type_id ] ?? array();
+                $service_name = $session_info['Name'] ?? 'Appointment';
+                $duration = intval( $session_info['DefaultTimeLength'] ?? 60 );
+                
+                // Build slot object
+                $bookable_slots[] = array(
+                    'SessionTypeId' => $session_type_id,
+                    'StaffId' => $staff_id,
+                    'StartDateTime' => $start_datetime,
+                    'Date' => $date,
+                    'Time' => $time,
+                    'TherapistName' => $therapist_name,
+                    'TherapistPhoto' => $therapist_photo,
+                    'Category' => $category,
+                    'Name' => $service_name,
+                    'Duration' => $duration,
+                    'Price' => floatval( $item['Price'] ?? 0 ),
+                );
+            }
+        }
     }
     
-    $stats['final_count'] = count( $filtered_services );
-    
     return new WP_REST_Response( array(
-        'services'           => $filtered_services,
-        'total_count'        => count( $filtered_services ),
-        'target_categories'  => $target_categories,
-        'staff_photos_count' => count( $staff_photos ),
-        'stats'              => $stats,
+        'success' => true,
+        'slots' => $bookable_slots,
+        'total_count' => count( $bookable_slots ),
+        'date_range' => array(
+            'start' => $start_date,
+            'end' => $end_date,
+        ),
+        'target_categories' => $target_categories,
+        'data_source' => 'bookable_items',
     ), 200 );
 }
 
