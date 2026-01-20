@@ -110,3 +110,14 @@
 .auth-links .separator {
     color: #999;
 }
+
+/**
+ * Live-Action Loading Overlay (Requirement 5)
+ * Applied when filters change for real-time feedback
+ */
+.hw-mbo-loading-overlay {
+    position: relative;
+    opacity: 0.5;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+}

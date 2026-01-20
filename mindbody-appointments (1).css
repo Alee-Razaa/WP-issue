@@ -1098,11 +1098,15 @@
 
 .hw-mbo-date-box {
     border: 1px solid var(--hw-blue);
-    padding: 4px 12px;
+    padding: 8px 16px;
+    min-width: 95px;
+    text-align: center;
     font-weight: 500;
     color: var(--hw-blue);
     background: #f0f5ff;
-    border-radius: 2px;
+    border-radius: 4px;
+    white-space: nowrap;
+    font-size: 14px;
 }
 
 .hw-mbo-date-separator {
@@ -1121,15 +1125,8 @@
 .hw-mbo-therapist-name {
     text-transform: capitalize;
 }
-.hw-mbo-date-box {
-    display: inline-block;
-    padding: 4px 12px;
-    background: #f0f0f0;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    font-weight: 600;
-    margin: 0 4px;
-}
+
+/* Override duplicate - use primary date-box styles above */
 
 .hw-mbo-date-separator {
     margin: 0 8px;

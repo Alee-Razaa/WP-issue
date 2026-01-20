@@ -828,13 +828,10 @@ function hw_mindbody_rest_test_connection( $request ) {
 }
 
 /**
- * REST: Get treatment services filtered to 8 target categories with therapist photos
+ * REST: Get LIVE treatment availability from Mindbody bookable items API
  * 
- * STRICT FILTERING:
- * - Only 8 target treatment categories
- * - Only bookable online services
- * - No duplicates
- * - Proper duration extraction
+ * IMPORTANT: This fetches ACTUAL availability slots, not static service catalog.
+ * Each item returned has: SessionTypeId, StaffId, StartDateTime
  * 
  * @param WP_REST_Request $request Request object.
  * @return WP_REST_Response|WP_Error
@@ -846,7 +843,22 @@ function hw_mindbody_rest_get_treatment_services( $request ) {
         return new WP_Error( 'not_configured', 'Mindbody API is not configured.', array( 'status' => 500 ) );
     }
     
-    // The 8 target treatment categories - STRICT MATCH
+    // Get filter parameters
+    $filter_therapist = $request->get_param( 'therapist' );
+    $filter_time = $request->get_param( 'time' );
+    $filter_start_date = $request->get_param( 'start_date' ) ?: date( 'Y-m-d' );
+    $filter_end_date = $request->get_param( 'end_date' ) ?: date( 'Y-m-d', strtotime( '+7 days' ) );
+    $filter_categories = $request->get_param( 'categories' );
+    $debug_mode = $request->get_param( 'debug' ) === '1' || $request->get_param( 'debug' ) === 'true';
+    
+    error_log( '[MBO Live] ====== FETCHING LIVE AVAILABILITY ======' );
+    error_log( '[MBO Live] Date range: ' . $filter_start_date . ' to ' . $filter_end_date );
+    error_log( '[MBO Live] Therapist filter: ' . ( $filter_therapist ?: 'none' ) );
+    error_log( '[MBO Live] Time filter: ' . ( $filter_time ?: 'none' ) );
+    
+    $debug_data = array();
+    
+    // The 8 target treatment categories
     $target_categories = array(
         'Acupuncture & Eastern Med',
         'Energy & Healing Therapies',
@@ -858,193 +870,488 @@ function hw_mindbody_rest_get_treatment_services( $request ) {
         'Osteopathy & Physiotherapy',
     );
     
-    // Normalize category names for matching
-    $normalized_targets = array_map( function( $cat ) {
-        return strtolower( trim( $cat ) );
-    }, $target_categories );
+    // ============ STEP 1: Get Session Types (to know what SessionTypeIds to request) ============
+    $session_types = $api->get_session_types( array( 'Limit' => 500 ) );
+    $session_type_map = array(); // Map ID => session type data
+    $session_type_ids = array();
     
-    // Get all services
-    $all_services = $api->get_services( array( 'Limit' => 1000 ) );
-    
-    if ( is_wp_error( $all_services ) ) {
-        return $all_services;
+    if ( ! is_wp_error( $session_types ) && is_array( $session_types ) ) {
+        foreach ( $session_types as $st ) {
+            $st_id = $st['Id'] ?? null;
+            if ( $st_id ) {
+                $session_type_ids[] = $st_id;
+                $session_type_map[ strval( $st_id ) ] = $st;
+            }
+        }
+        error_log( '[MBO Live] Found ' . count( $session_type_ids ) . ' session types' );
     }
     
-    // Get staff with photos
-    $staff = $api->get_staff( array( 'Limit' => 500 ) );
-    $staff_photos = array();
-    $staff_data = array();
-    
-    if ( ! is_wp_error( $staff ) && is_array( $staff ) ) {
-        foreach ( $staff as $s ) {
-            $first_name = $s['FirstName'] ?? '';
-            $last_name  = $s['LastName'] ?? '';
-            $full_name  = trim( $first_name . ' ' . $last_name );
-            $image_url  = $s['ImageUrl'] ?? '';
-            
-            // Store full staff data
-            if ( $full_name ) {
-                $staff_data[ $full_name ] = $s;
-            }
-            
-            if ( $full_name && $image_url ) {
-                $staff_photos[ $full_name ] = $image_url;
-                // Also store by first name for matching
-                if ( $first_name ) {
-                    $staff_photos[ $first_name ] = $image_url;
+    // Fallback: also get services to supplement data
+    $services = $api->get_services( array( 'Limit' => 1000 ) );
+    $service_map = array();
+    if ( ! is_wp_error( $services ) && is_array( $services ) ) {
+        foreach ( $services as $svc ) {
+            $svc_id = $svc['Id'] ?? null;
+            if ( $svc_id ) {
+                $service_map[ strval( $svc_id ) ] = $svc;
+                // Add to session type IDs if not already there
+                if ( ! in_array( $svc_id, $session_type_ids ) ) {
+                    $session_type_ids[] = $svc_id;
                 }
             }
         }
+        error_log( '[MBO Live] Found ' . count( $services ) . ' services' );
     }
     
-    // Filter services to target categories
-    $filtered_services = array();
-    $seen_services = array(); // Track duplicates by unique key
-    $stats = array(
-        'total_in_mindbody'    => count( $all_services ),
-        'not_bookable_online'  => 0,
-        'wrong_category'       => 0,
-        'no_duration'          => 0,
-        'duplicates_removed'   => 0,
-        'final_count'          => 0,
-        'categories_found'     => array(),
+    // ============ STEP 2: Get Staff (for photos and filtering) ============
+    $staff_list = $api->get_staff( array( 'Limit' => 500 ) );
+    $staff_map = array(); // Map ID => staff data
+    $staff_by_name = array(); // Map name => staff data
+    $staff_id_for_filter = null;
+    
+    if ( ! is_wp_error( $staff_list ) && is_array( $staff_list ) ) {
+        foreach ( $staff_list as $s ) {
+            $staff_id = $s['Id'] ?? null;
+            $first_name = $s['FirstName'] ?? '';
+            $last_name = $s['LastName'] ?? '';
+            $full_name = trim( $first_name . ' ' . $last_name );
+            
+            if ( $staff_id ) {
+                $staff_map[ strval( $staff_id ) ] = $s;
+            }
+            if ( $full_name ) {
+                $staff_by_name[ strtolower( $full_name ) ] = $s;
+                $staff_by_name[ strtolower( $first_name ) ] = $s; // Also by first name
+            }
+            
+            // Find staff ID for filter
+            if ( $filter_therapist ) {
+                $filter_lower = strtolower( trim( $filter_therapist ) );
+                $filter_first = strtolower( explode( ' ', $filter_therapist )[0] );
+                $staff_lower = strtolower( $full_name );
+                
+                if ( $staff_lower === $filter_lower ||
+                     strpos( $staff_lower, $filter_lower ) !== false ||
+                     strtolower( $first_name ) === $filter_first ) {
+                    $staff_id_for_filter = $staff_id;
+                    error_log( '[MBO Live] Matched therapist filter: ' . $full_name . ' (ID: ' . $staff_id . ')' );
+                }
+            }
+        }
+        error_log( '[MBO Live] Found ' . count( $staff_list ) . ' staff members' );
+    }
+    
+    if ( $debug_mode ) {
+        $debug_data['session_types_count'] = count( $session_type_ids );
+        $debug_data['services_count'] = count( $services );
+        $debug_data['staff_count'] = count( $staff_list );
+        $debug_data['staff_names'] = array_keys( $staff_by_name );
+        $debug_data['staff_id_for_filter'] = $staff_id_for_filter;
+    }
+    
+    // ============ STEP 3: Fetch LIVE Bookable Items (actual availability) ============
+    $bookable_params = array(
+        'StartDate' => $filter_start_date,
+        'EndDate'   => $filter_end_date,
+        'Limit'     => 1000,
     );
     
-    foreach ( $all_services as $service ) {
-        // Get category
-        $category = '';
-        if ( isset( $service['ServiceCategory']['Name'] ) ) {
-            $category = $service['ServiceCategory']['Name'];
-        } elseif ( isset( $service['Program'] ) ) {
-            $category = $service['Program'];
-        }
-        
-        $normalized_category = strtolower( trim( $category ) );
-        
-        // STRICT category matching - must match one of 8 target categories
-        $matched_category = null;
-        foreach ( $target_categories as $idx => $target ) {
-            $normalized_target = $normalized_targets[ $idx ];
-            
-            // Exact match or close match
-            if ( $normalized_category === $normalized_target ||
-                 strpos( $normalized_category, $normalized_target ) !== false ||
-                 strpos( $normalized_target, $normalized_category ) !== false ) {
-                $matched_category = $target;
-                break;
-            }
-        }
-        
-        if ( ! $matched_category ) {
-            $stats['wrong_category']++;
-            continue;
-        }
-        
-        // Track categories found
-        if ( ! isset( $stats['categories_found'][ $matched_category ] ) ) {
-            $stats['categories_found'][ $matched_category ] = 0;
-        }
-        $stats['categories_found'][ $matched_category ]++;
-        
-        // Check if bookable online - skip if explicitly set to false
-        $bookable_online = $service['AllowOnlineBooking'] ?? $service['OnlineBooking'] ?? true;
-        if ( $bookable_online === false ) {
-            $stats['not_bookable_online']++;
-            continue;
-        }
-        
-        // Extract duration from service data or name
-        $duration = 0;
-        
-        // First try from service object fields
-        if ( isset( $service['Duration'] ) && $service['Duration'] > 0 ) {
-            $duration = intval( $service['Duration'] );
-        } elseif ( isset( $service['Length'] ) && $service['Length'] > 0 ) {
-            $duration = intval( $service['Length'] );
-        } elseif ( isset( $service['SessionLength'] ) && $service['SessionLength'] > 0 ) {
-            $duration = intval( $service['SessionLength'] );
-        }
-        
-        // If still no duration, extract from service name
-        if ( $duration === 0 ) {
-            $service_name = $service['Name'] ?? '';
-            
-            // Try multiple patterns: "60min", "60'", "60 min", "- 60min", etc.
-            if ( preg_match( '/(\d+)\s*(?:min|mins|minutes|\')/i', $service_name, $matches ) ) {
-                $duration = intval( $matches[1] );
-            } elseif ( preg_match( '/-\s*(\d+)\s*$/', $service_name, $matches ) ) {
-                // Pattern: "Service Name - 60"
-                $duration = intval( $matches[1] );
-            }
-        }
-        
-        // Skip services without valid duration
-        if ( $duration <= 0 ) {
-            $stats['no_duration']++;
-            // Don't skip - still include but with 0 duration
-        }
-        
-        // Extract therapist name from service name
-        $service_name = $service['Name'] ?? '';
-        $therapist_name = '';
-        $therapist_photo = '';
-        
-        // Pattern: "Service Name - Therapist Name - Duration" or "Service Name - Therapist Name"
-        if ( preg_match( '/\s-\s([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?)\s*(?:-|$|\d|\')/i', $service_name, $matches ) ) {
-            $therapist_name = trim( $matches[1] );
-            // Make sure it's not a duration pattern
-            if ( preg_match( '/^\d+\s*(min|mins|minutes)?$/i', $therapist_name ) ) {
-                $therapist_name = '';
-            }
-        }
-        
-        // Look up therapist photo
-        if ( $therapist_name ) {
-            if ( isset( $staff_photos[ $therapist_name ] ) ) {
-                $therapist_photo = $staff_photos[ $therapist_name ];
-            } else {
-                // Try first name only
-                $first_name = explode( ' ', $therapist_name )[0];
-                if ( isset( $staff_photos[ $first_name ] ) ) {
-                    $therapist_photo = $staff_photos[ $first_name ];
-                }
-            }
-        }
-        
-        // Create unique key to prevent duplicates
-        $unique_key = $service['Id'] ?? md5( $service_name . $therapist_name . $duration );
-        
-        if ( isset( $seen_services[ $unique_key ] ) ) {
-            $stats['duplicates_removed']++;
-            continue;
-        }
-        $seen_services[ $unique_key ] = true;
-        
-        // Build clean service object
-        $clean_service = array(
-            'Id'              => $service['Id'] ?? null,
-            'Name'            => $service_name,
-            'Price'           => floatval( $service['Price'] ?? $service['OnlinePrice'] ?? 0 ),
-            'Duration'        => $duration,
-            'Category'        => $matched_category,
-            'TherapistName'   => $therapist_name,
-            'TherapistPhoto'  => $therapist_photo,
-            'BookableOnline'  => true,
-            'OriginalData'    => $service, // Keep original for reference
-        );
-        
-        $filtered_services[] = $clean_service;
+    // Add session type IDs (first 50 to avoid too large request)
+    if ( ! empty( $session_type_ids ) ) {
+        $bookable_params['SessionTypeIds'] = array_slice( $session_type_ids, 0, 50 );
     }
     
-    $stats['final_count'] = count( $filtered_services );
+    // Add staff filter if therapist selected
+    if ( $staff_id_for_filter ) {
+        $bookable_params['StaffIds'] = array( $staff_id_for_filter );
+    }
     
-    return new WP_REST_Response( array(
-        'services'           => $filtered_services,
-        'total_count'        => count( $filtered_services ),
-        'target_categories'  => $target_categories,
-        'staff_photos_count' => count( $staff_photos ),
-        'stats'              => $stats,
-    ), 200 );
+    error_log( '[MBO Live] Calling bookable items with params: ' . json_encode( $bookable_params ) );
+    
+    $bookable_items = $api->get_bookable_items( $bookable_params );
+    
+    // Detailed logging for debugging
+    if ( is_wp_error( $bookable_items ) ) {
+        error_log( '[MBO Live] ERROR from get_bookable_items: ' . $bookable_items->get_error_message() );
+    } elseif ( ! is_array( $bookable_items ) ) {
+        error_log( '[MBO Live] WARNING: get_bookable_items returned non-array: ' . gettype( $bookable_items ) );
+    } elseif ( empty( $bookable_items ) ) {
+        error_log( '[MBO Live] WARNING: get_bookable_items returned empty array' );
+    } else {
+        error_log( '[MBO Live] get_bookable_items returned ' . count( $bookable_items ) . ' items' );
+        // Log first item structure
+        $first_item = $bookable_items[0];
+        error_log( '[MBO Live] First item keys: ' . implode( ', ', array_keys( $first_item ) ) );
+    }
+    
+    $availability_slots = array();
+    
+    if ( ! is_wp_error( $bookable_items ) && is_array( $bookable_items ) && ! empty( $bookable_items ) ) {
+        error_log( '[MBO Live] SUCCESS: Got ' . count( $bookable_items ) . ' bookable items!' );
+        
+        foreach ( $bookable_items as $item ) {
+            // Extract required fields
+            $start_datetime = $item['StartDateTime'] ?? null;
+            $staff_data = $item['Staff'] ?? array();
+            $session_type_data = $item['SessionType'] ?? array();
+            $location_data = $item['Location'] ?? array();
+            
+            $staff_id = $staff_data['Id'] ?? null;
+            $staff_name = $staff_data['Name'] ?? trim( ( $staff_data['FirstName'] ?? '' ) . ' ' . ( $staff_data['LastName'] ?? '' ) );
+            $staff_image = $staff_data['ImageUrl'] ?? '';
+            
+            $session_type_id = $session_type_data['Id'] ?? null;
+            $session_name = $session_type_data['Name'] ?? '';
+            $duration = $session_type_data['DefaultTimeLength'] ?? $session_type_data['Duration'] ?? 0;
+            
+            // Get category from service map or session type map
+            $category = '';
+            $price = 0;
+            if ( $session_type_id ) {
+                $svc = $service_map[ strval( $session_type_id ) ] ?? $session_type_map[ strval( $session_type_id ) ] ?? null;
+                if ( $svc ) {
+                    $category = $svc['ServiceCategory']['Name'] ?? $svc['Category'] ?? $svc['Program'] ?? '';
+                    $price = $svc['Price'] ?? $svc['OnlinePrice'] ?? 0;
+                    if ( ! $duration ) {
+                        $duration = $svc['Duration'] ?? $svc['Length'] ?? 0;
+                    }
+                }
+            }
+            
+            // Get staff image from staff map if not in bookable item
+            if ( ! $staff_image && $staff_id && isset( $staff_map[ strval( $staff_id ) ] ) ) {
+                $staff_image = $staff_map[ strval( $staff_id ) ]['ImageUrl'] ?? '';
+            }
+            
+            // Skip if missing required fields
+            if ( ! $start_datetime || ! $session_type_id ) {
+                continue;
+            }
+            
+            // Parse date and time
+            $date_only = substr( $start_datetime, 0, 10 ); // YYYY-MM-DD
+            $time_only = substr( $start_datetime, 11, 5 ); // HH:MM
+            
+            // Apply time filter if set
+            if ( $filter_time ) {
+                $filter_hour = intval( substr( $filter_time, 0, 2 ) );
+                $slot_hour = intval( substr( $time_only, 0, 2 ) );
+                
+                // Filter logic: match within 2 hours of selected time
+                if ( abs( $slot_hour - $filter_hour ) > 2 ) {
+                    continue;
+                }
+            }
+            
+            $availability_slots[] = array(
+                'Id'              => $item['Id'] ?? uniqid( 'slot_' ),
+                'SessionTypeId'   => strval( $session_type_id ),
+                'StaffId'         => $staff_id ? strval( $staff_id ) : null,
+                'StartDateTime'   => $start_datetime,
+                'Date'            => $date_only,
+                'Time'            => $time_only,
+                'Name'            => $session_name,
+                'Duration'        => intval( $duration ),
+                'Price'           => floatval( $price ),
+                'Category'        => $category,
+                'TherapistId'     => $staff_id ? strval( $staff_id ) : null,
+                'TherapistName'   => $staff_name,
+                'TherapistPhoto'  => $staff_image,
+                'LocationId'      => $location_data['Id'] ?? null,
+                'LocationName'    => $location_data['Name'] ?? '',
+            );
+        }
+        
+        error_log( '[MBO Live] Processed ' . count( $availability_slots ) . ' slots after filtering' );
+        
+    } else {
+        $error_msg = is_wp_error( $bookable_items ) ? $bookable_items->get_error_message() : 'empty response';
+        error_log( '[MBO Live] WARNING: Bookable items returned: ' . $error_msg );
+        
+        // ============ FALLBACK: Try activesessiontimes endpoint ============
+        error_log( '[MBO Live] Trying activesessiontimes as fallback...' );
+        
+        $active_params = array(
+            'StartTime'       => $filter_start_date . 'T00:00:00',
+            'EndTime'         => $filter_end_date . 'T23:59:59',
+            'Limit'           => 500,
+            'ScheduleType'    => 'Appointment',
+        );
+        
+        if ( ! empty( $session_type_ids ) ) {
+            $active_params['SessionTypeIds'] = array_slice( $session_type_ids, 0, 50 );
+        }
+        
+        $active_times = $api->get_active_session_times( $active_params );
+        
+        if ( ! is_wp_error( $active_times ) && is_array( $active_times ) && ! empty( $active_times ) ) {
+            error_log( '[MBO Live] FALLBACK SUCCESS: Got ' . count( $active_times ) . ' active session times' );
+            
+            foreach ( $active_times as $item ) {
+                $start_datetime = $item['StartDateTime'] ?? $item['StartTime'] ?? null;
+                $staff_id = $item['StaffId'] ?? $item['Staff']['Id'] ?? null;
+                $session_type_id = $item['SessionTypeId'] ?? $item['SessionType']['Id'] ?? null;
+                
+                if ( ! $start_datetime || ! $session_type_id ) {
+                    continue;
+                }
+                
+                // Get staff info
+                $staff_name = '';
+                $staff_image = '';
+                if ( $staff_id && isset( $staff_map[ strval( $staff_id ) ] ) ) {
+                    $s = $staff_map[ strval( $staff_id ) ];
+                    $staff_name = trim( ( $s['FirstName'] ?? '' ) . ' ' . ( $s['LastName'] ?? '' ) );
+                    $staff_image = $s['ImageUrl'] ?? '';
+                }
+                
+                // Apply therapist filter
+                if ( $staff_id_for_filter && strval( $staff_id ) !== strval( $staff_id_for_filter ) ) {
+                    continue;
+                }
+                
+                // Get service info
+                $session_name = '';
+                $category = '';
+                $price = 0;
+                $duration = 0;
+                $svc = $service_map[ strval( $session_type_id ) ] ?? $session_type_map[ strval( $session_type_id ) ] ?? null;
+                if ( $svc ) {
+                    $session_name = $svc['Name'] ?? '';
+                    $category = $svc['ServiceCategory']['Name'] ?? $svc['Category'] ?? $svc['Program'] ?? '';
+                    $price = $svc['Price'] ?? $svc['OnlinePrice'] ?? 0;
+                    $duration = $svc['Duration'] ?? $svc['Length'] ?? 0;
+                }
+                
+                $date_only = substr( $start_datetime, 0, 10 );
+                $time_only = substr( $start_datetime, 11, 5 );
+                
+                // Apply time filter
+                if ( $filter_time ) {
+                    $filter_hour = intval( substr( $filter_time, 0, 2 ) );
+                    $slot_hour = intval( substr( $time_only, 0, 2 ) );
+                    if ( abs( $slot_hour - $filter_hour ) > 2 ) {
+                        continue;
+                    }
+                }
+                
+                $availability_slots[] = array(
+                    'Id'              => $item['Id'] ?? uniqid( 'slot_' ),
+                    'SessionTypeId'   => strval( $session_type_id ),
+                    'StaffId'         => $staff_id ? strval( $staff_id ) : null,
+                    'StartDateTime'   => $start_datetime,
+                    'Date'            => $date_only,
+                    'Time'            => $time_only,
+                    'Name'            => $session_name,
+                    'Duration'        => intval( $duration ),
+                    'Price'           => floatval( $price ),
+                    'Category'        => $category,
+                    'TherapistId'     => $staff_id ? strval( $staff_id ) : null,
+                    'TherapistName'   => $staff_name,
+                    'TherapistPhoto'  => $staff_image,
+                    'LocationId'      => $item['LocationId'] ?? null,
+                    'LocationName'    => $item['LocationName'] ?? '',
+                );
+            }
+            
+            error_log( '[MBO Live] Processed ' . count( $availability_slots ) . ' slots from fallback' );
+        } else {
+            error_log( '[MBO Live] FALLBACK also returned empty. Static catalog will be used.' );
+        }
+    }
+    
+    // ============ STEP 4: If still no slots, fall back to static services ============
+    // This provides service catalog data without real-time availability
+    if ( empty( $availability_slots ) && ! is_wp_error( $services ) ) {
+        error_log( '[MBO Live] Using static service catalog as last resort (no live availability)' );
+        
+        // Track unique services to avoid duplicates
+        $seen_services = array();
+        
+        foreach ( $services as $svc ) {
+            $svc_id = $svc['Id'] ?? null;
+            $svc_name = $svc['Name'] ?? '';
+            $category = $svc['ServiceCategory']['Name'] ?? $svc['Category'] ?? $svc['Program'] ?? '';
+            $price = $svc['Price'] ?? $svc['OnlinePrice'] ?? 0;
+            $duration = $svc['Duration'] ?? $svc['Length'] ?? 0;
+            
+            // Skip if already seen this service ID
+            if ( $svc_id && isset( $seen_services[ $svc_id ] ) ) {
+                continue;
+            }
+            if ( $svc_id ) {
+                $seen_services[ $svc_id ] = true;
+            }
+            
+            // Filter to target categories
+            $category_lower = strtolower( trim( $category ) );
+            $is_target = false;
+            $matched_category = $category; // Keep original category name
+            foreach ( $target_categories as $target ) {
+                $target_lower = strtolower( $target );
+                if ( strpos( $category_lower, strtolower( substr( $target, 0, 10 ) ) ) !== false ||
+                     $category_lower === $target_lower ) {
+                    $is_target = true;
+                    $matched_category = $target; // Use standard category name
+                    break;
+                }
+            }
+            if ( ! $is_target ) {
+                continue;
+            }
+            
+            // Extract therapist from service name
+            $therapist_name = '';
+            if ( preg_match( '/\s-\s([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?)\s*(?:-|$|\d|\')/i', $svc_name, $matches ) ) {
+                $therapist_name = trim( $matches[1] );
+                if ( preg_match( '/^\d+\s*(min|mins)?$/i', $therapist_name ) ) {
+                    $therapist_name = '';
+                }
+            }
+            
+            // Apply therapist filter to static services
+            if ( $filter_therapist ) {
+                $filter_lower = strtolower( trim( $filter_therapist ) );
+                $filter_first = strtolower( explode( ' ', $filter_therapist )[0] );
+                $therapist_lower = strtolower( $therapist_name );
+                $svc_name_lower = strtolower( $svc_name );
+                
+                $matches_filter = false;
+                if ( $therapist_name && strpos( $therapist_lower, $filter_first ) !== false ) {
+                    $matches_filter = true;
+                } elseif ( strpos( $svc_name_lower, $filter_first ) !== false ) {
+                    $matches_filter = true;
+                }
+                
+                if ( ! $matches_filter ) {
+                    continue;
+                }
+            }
+            
+            // Get therapist photo
+            $therapist_photo = '';
+            if ( $therapist_name && isset( $staff_by_name[ strtolower( $therapist_name ) ] ) ) {
+                $therapist_photo = $staff_by_name[ strtolower( $therapist_name ) ]['ImageUrl'] ?? '';
+            }
+            
+            // For static catalog, create ONE entry per service (no date multiplication)
+            // The frontend will handle display without real-time slots
+            $availability_slots[] = array(
+                'Id'              => strval( $svc_id ),
+                'SessionTypeId'   => strval( $svc_id ),
+                'StaffId'         => null,
+                'StartDateTime'   => null, // No specific time for static catalog
+                'Date'            => null, // No specific date for static catalog
+                'Time'            => null, // No specific time for static catalog
+                'Name'            => $svc_name,
+                'Duration'        => intval( $duration ),
+                'Price'           => floatval( $price ),
+                'Category'        => $matched_category,
+                'TherapistId'     => null,
+                'TherapistName'   => $therapist_name,
+                'TherapistPhoto'  => $therapist_photo,
+                'LocationId'      => null,
+                'LocationName'    => '',
+                '_source'         => 'static_catalog', // Mark as static data
+            );
+        }
+        
+        error_log( '[MBO Live] Returned ' . count( $availability_slots ) . ' static services (no time multiplication)' );
+    }
+    
+    // ============ STEP 5: Group slots by date for easy frontend rendering ============
+    $slots_by_date = array();
+    $all_therapists = array();
+    $all_dates = array();
+    
+    foreach ( $availability_slots as $slot ) {
+        $date = $slot['Date'];
+        
+        // Handle static catalog entries (no date)
+        if ( empty( $date ) ) {
+            $date = '_no_date'; // Group all static services together
+        }
+        
+        if ( ! isset( $slots_by_date[ $date ] ) ) {
+            $slots_by_date[ $date ] = array();
+            if ( $date !== '_no_date' ) {
+                $all_dates[] = $date;
+            }
+        }
+        $slots_by_date[ $date ][] = $slot;
+        
+        // Collect unique therapists
+        if ( ! empty( $slot['TherapistName'] ) ) {
+            $all_therapists[ $slot['TherapistName'] ] = array(
+                'id'    => $slot['TherapistId'],
+                'name'  => $slot['TherapistName'],
+                'photo' => $slot['TherapistPhoto'],
+            );
+        }
+    }
+    
+    sort( $all_dates );
+    
+    // Stats - include both new and legacy field names for frontend compatibility
+    $data_source = ! empty( $bookable_items ) && ! is_wp_error( $bookable_items ) ? 'bookable_items' : ( ! empty( $active_times ?? null ) ? 'active_session_times' : 'static_catalog' );
+    $has_live_data = $data_source !== 'static_catalog';
+    
+    $stats = array(
+        // New field names
+        'total_slots'             => count( $availability_slots ),
+        'dates_count'             => count( $all_dates ),
+        'therapists_count'        => count( $all_therapists ),
+        'has_live_data'           => $has_live_data,
+        'data_source'             => $data_source,
+        // Legacy field names for frontend compatibility
+        'total_in_mindbody'       => count( $services ),
+        'final_count'             => count( $availability_slots ),
+        'availability_checked'    => $has_live_data,
+        'force_empty'             => false,
+        'bookable_items_count'    => is_array( $bookable_items ) && ! is_wp_error( $bookable_items ) ? count( $bookable_items ) : 0,
+        'dates_with_availability' => $all_dates,
+        'not_bookable_online'     => 0,
+        'wrong_category'          => 0,
+        'duplicates_removed'      => 0,
+        'no_duration'             => 0,
+        'no_availability'         => 0,
+        'categories_found'        => array(),
+    );
+    
+    if ( $debug_mode ) {
+        $debug_data['bookable_items_raw_count'] = is_array( $bookable_items ) ? count( $bookable_items ) : 0;
+        $debug_data['bookable_items_sample'] = is_array( $bookable_items ) ? array_slice( $bookable_items, 0, 3 ) : array();
+        $debug_data['final_slots_count'] = count( $availability_slots );
+        $debug_data['dates_with_slots'] = $all_dates;
+    }
+    
+    error_log( '[MBO Live] ====== COMPLETE: ' . count( $availability_slots ) . ' slots, ' . count( $all_dates ) . ' dates, source=' . $data_source . ' ======' );
+    
+    // Build response
+    $response_data = array(
+        'services'          => $availability_slots, // Keep 'services' key for frontend compatibility
+        'total_count'       => count( $availability_slots ),
+        'data_source'       => $data_source, // Add at top level for easy frontend access
+        'has_live_data'     => $has_live_data,
+        'slots_by_date'     => $slots_by_date,
+        'dates'             => $all_dates,
+        'therapists'        => array_values( $all_therapists ),
+        'target_categories' => $target_categories,
+        'stats'             => $stats,
+        'filters_received'  => array(
+            'therapist'  => $filter_therapist,
+            'time'       => $filter_time,
+            'start_date' => $filter_start_date,
+            'end_date'   => $filter_end_date,
+            'categories' => $filter_categories,
+        ),
+    );
+    
+    if ( $debug_mode ) {
+        $response_data['debug'] = $debug_data;
+    }
+    
+    return new WP_REST_Response( $response_data, 200 );
 }
 
 /**
