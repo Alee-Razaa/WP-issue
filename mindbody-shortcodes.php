@@ -259,10 +259,9 @@ function hw_mindbody_appointments_shortcode( $atts ) {
              */
             function safeGetStaffName(item) {
                 if (!item || typeof item !== 'object') return '';
-                // Direct name fields
-                if (item.Name) return String(item.Name).trim();
-                if (item.StaffName) return String(item.StaffName).trim();
+                // Check TherapistName FIRST (this is the field from our API)
                 if (item.TherapistName) return String(item.TherapistName).trim();
+                if (item.StaffName) return String(item.StaffName).trim();
                 // FirstName + LastName
                 const first = item.FirstName || item.firstName || '';
                 const last = item.LastName || item.lastName || '';
@@ -1033,16 +1032,24 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 let services = [...allServices];
                 console.log('[RENDER DEBUG] Initial services count:', services.length);
                 
-                // Local filtering for categories (server already filters, but double-check)
+                // Local filtering for categories using exact Category field
                 if (selectedCategories.size > 0) {
                     console.log('[RENDER DEBUG] Applying local category filter:', Array.from(selectedCategories));
                     services = services.filter(s => {
-                        const serviceCat = s.Category || (s.ServiceCategory && s.ServiceCategory.Name) || s.Program || '';
+                        // Use exact Category field from API response
+                        const serviceCategory = (s.Category || '').toLowerCase().trim();
+                        
                         for (const cat of selectedCategories) {
-                            if (serviceCat.toLowerCase().includes(cat.toLowerCase().split(' ')[0]) ||
-                                cat.toLowerCase().includes(serviceCat.toLowerCase().split(' ')[0])) {
-                                return true;
-                            }
+                            const catLower = cat.toLowerCase().trim();
+                            // Exact match
+                            if (serviceCategory === catLower) return true;
+                            // Partial match (category contains filter or filter contains category)
+                            if (serviceCategory.includes(catLower)) return true;
+                            if (catLower.includes(serviceCategory)) return true;
+                            // First word match (for categories like "Acupuncture & Eastern Med")
+                            const catFirstWord = catLower.split(' ')[0];
+                            const svcFirstWord = serviceCategory.split(' ')[0];
+                            if (catFirstWord === svcFirstWord) return true;
                         }
                         return false;
                     });
@@ -1068,31 +1075,30 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     const therapistFirstName = therapistLower.split(' ')[0];
                     
                     services = services.filter(s => {
-                        // Use helper for therapist name with fallbacks
-                        const svcTherapist = safeGetStaffName(s).toLowerCase();
-                        if (svcTherapist && svcTherapist.includes(therapistLower)) {
-                            return true;
-                        }
-                        if (svcTherapist && svcTherapist.includes(therapistFirstName)) {
-                            return true;
-                        }
-                        
-                        // Check service name for therapist name pattern
-                        const serviceName = safeGetServiceName(s).toLowerCase();
-                        if (serviceName.includes(therapistLower)) {
-                            return true;
-                        }
-                        if (serviceName.includes(therapistFirstName)) {
-                            return true;
+                        // PRIORITY 1: Check TherapistName field directly (exact field from API)
+                        const therapistName = (s.TherapistName || '').toLowerCase().trim();
+                        if (therapistName) {
+                            // Exact match or partial match
+                            if (therapistName === therapistLower) return true;
+                            if (therapistName.includes(therapistLower)) return true;
+                            if (therapistLower.includes(therapistName)) return true;
+                            // First name match
+                            if (therapistName.includes(therapistFirstName)) return true;
+                            if (therapistName.split(' ')[0] === therapistFirstName) return true;
                         }
                         
-                        // Extract therapist from service name pattern "Treatment - Therapist Name - Duration"
-                        const match = serviceName.match(/\s-\s([a-z]+(?:\s+[a-z]+)*)\s*(?:-|$)/i);
+                        // PRIORITY 2: Check service Name for therapist pattern
+                        const serviceName = (s.Name || '').toLowerCase();
+                        if (serviceName.includes(therapistLower)) return true;
+                        if (serviceName.includes(therapistFirstName)) return true;
+                        
+                        // PRIORITY 3: Extract from service name pattern "Treatment - Therapist Name - Duration"
+                        const match = serviceName.match(/\s-\s([a-z]+(?:\s+[a-z]\.?)?(?:\s+[a-z]+)?)\s*(?:-|$|\d|\')/i);
                         if (match) {
-                            const extractedName = match[1].toLowerCase();
-                            if (extractedName.includes(therapistFirstName) || therapistLower.includes(extractedName)) {
-                                return true;
-                            }
+                            const extractedName = match[1].toLowerCase().trim();
+                            if (extractedName === therapistFirstName) return true;
+                            if (extractedName.includes(therapistFirstName)) return true;
+                            if (therapistLower.includes(extractedName)) return true;
                         }
                         
                         return false;
@@ -1103,8 +1109,11 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     if (services.length > 0) {
                         console.log('[RENDER DEBUG] Sample filtered services:', services.slice(0, 3).map(s => ({
                             name: s.Name,
-                            therapist: s.TherapistName
+                            therapistName: s.TherapistName
                         })));
+                    } else {
+                        console.log('[RENDER DEBUG] WARNING: No services matched therapist filter!');
+                        console.log('[RENDER DEBUG] Sample service TherapistName values:', allServices.slice(0, 10).map(s => s.TherapistName));
                     }
                 }
                 
@@ -1112,15 +1121,55 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 const selectedTime = filterTime ? filterTime.value : '';
                 console.log('[RENDER DEBUG] Time filter (for rendering):', selectedTime || 'none');
                 
+                // NEW: Filter by Time field (exact field from API)
+                if (selectedTime) {
+                    const filterHour = parseInt(selectedTime.split(':')[0], 10);
+                    console.log('[RENDER DEBUG] Filtering by time hour:', filterHour);
+                    
+                    services = services.filter(s => {
+                        // Use exact Time field from API (e.g., "11:00", "14:00")
+                        const slotTime = s.Time || '';
+                        if (!slotTime) return true; // Keep if no time (static catalog without time)
+                        
+                        const slotHour = parseInt(slotTime.split(':')[0], 10);
+                        // Match within 2 hours of selected time
+                        return Math.abs(slotHour - filterHour) <= 2;
+                    });
+                    console.log('[RENDER DEBUG] After time filter:', services.length);
+                }
+                
+                // NEW: Filter by Date field (exact field from API)
+                // Get selected dates from the date picker
+                const selectedDates = [];
+                document.querySelectorAll('.date-box.selected').forEach(box => {
+                    const dateStr = box.dataset.date; // Format: YYYY-MM-DD
+                    if (dateStr) selectedDates.push(dateStr);
+                });
+                
+                if (selectedDates.length > 0) {
+                    console.log('[RENDER DEBUG] Filtering by dates:', selectedDates);
+                    
+                    services = services.filter(s => {
+                        // Use exact Date field from API (e.g., "2026-02-02")
+                        const slotDate = s.Date || '';
+                        if (!slotDate) return true; // Keep if no date (static catalog without date)
+                        
+                        return selectedDates.includes(slotDate);
+                    });
+                    console.log('[RENDER DEBUG] After date filter:', services.length);
+                }
+                
                 // Group services by therapist + treatment name
                 const groupedByTherapistAndTreatment = {};
                 
                 services.forEach(service => {
-                    // Use helper for service name
-                    const serviceName = safeGetServiceName(service);
+                    // Use exact Name field from API
+                    const serviceName = service.Name || '';
                     
-                    // Use helper for therapist name with fallbacks
-                    let therapistName = safeGetStaffName(service);
+                    // Use exact TherapistName field from API (prioritize this)
+                    let therapistName = (service.TherapistName || '').trim();
+                    
+                    // Fallback: extract from service name if TherapistName is empty
                     if (!therapistName) {
                         const therapistMatch = serviceName.match(/\s-\s([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?)\s*(?:-|$|\d|\')/i);
                         if (therapistMatch) {
