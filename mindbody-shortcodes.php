@@ -1021,498 +1021,222 @@ function hw_mindbody_appointments_shortcode( $atts ) {
             }
             
             /**
-             * REQUIREMENT 2: Process server data and render - called AFTER server fetch
-             * FIX: This now only processes data that was already fetched from server
+             * CLEAN REFACTOR: Process server data and render
+             * Uses exact API field names: Date, Time, TherapistName, Category, Id
              */
             async function processAndRenderServices() {
-                console.log('[RENDER DEBUG] ====== processAndRenderServices START ======');
-                console.log('[RENDER DEBUG] allServices count:', allServices.length);
+                console.log('[FILTER] Processing', allServices.length, 'services');
                 
-                // Work with already-fetched allServices (updated from server)
                 let services = [...allServices];
-                console.log('[RENDER DEBUG] Initial services count:', services.length);
                 
-                // Local filtering for categories using exact Category field
+                // 1. CATEGORY FILTER - exact Category field
                 if (selectedCategories.size > 0) {
-                    console.log('[RENDER DEBUG] Applying local category filter:', Array.from(selectedCategories));
                     services = services.filter(s => {
-                        // Use exact Category field from API response
-                        const serviceCategory = (s.Category || '').toLowerCase().trim();
-                        
+                        const svcCategory = (s.Category || '').toLowerCase().trim();
                         for (const cat of selectedCategories) {
                             const catLower = cat.toLowerCase().trim();
-                            // Exact match
-                            if (serviceCategory === catLower) return true;
-                            // Partial match (category contains filter or filter contains category)
-                            if (serviceCategory.includes(catLower)) return true;
-                            if (catLower.includes(serviceCategory)) return true;
-                            // First word match (for categories like "Acupuncture & Eastern Med")
-                            const catFirstWord = catLower.split(' ')[0];
-                            const svcFirstWord = serviceCategory.split(' ')[0];
-                            if (catFirstWord === svcFirstWord) return true;
+                            if (svcCategory.includes(catLower) || catLower.includes(svcCategory)) {
+                                return true;
+                            }
                         }
                         return false;
                     });
-                    console.log('[RENDER DEBUG] After category filter:', services.length);
+                    console.log('[FILTER] After category:', services.length);
                 }
                 
-                // Local filtering for specific services (use idsMatch helper)
-                if (selectedServices.size > 0) {
-                    console.log('[RENDER DEBUG] Applying local service filter:', Array.from(selectedServices));
-                    const selectedIds = Array.from(selectedServices);
+                // 2. THERAPIST FILTER - exact TherapistName field
+                const selectedTherapist = filterTherapist ? filterTherapist.value : '';
+                if (selectedTherapist) {
+                    const therapistLower = selectedTherapist.toLowerCase().trim();
                     services = services.filter(s => {
-                        const svcId = safeGetId(s);
-                        return selectedIds.some(selId => idsMatch(svcId, selId));
+                        const svcTherapist = (s.TherapistName || '').toLowerCase().trim();
+                        return svcTherapist.includes(therapistLower) || therapistLower.includes(svcTherapist);
                     });
-                    console.log('[RENDER DEBUG] After service filter:', services.length);
+                    console.log('[FILTER] After therapist:', services.length);
                 }
                 
-                // Additional local therapist filter (backup if server didn't filter)
-                const selectedTherapistName = filterTherapist ? filterTherapist.value : '';
-                if (selectedTherapistName) {
-                    console.log('[RENDER DEBUG] Applying local therapist filter:', selectedTherapistName);
-                    const therapistLower = selectedTherapistName.toLowerCase().trim();
-                    const therapistFirstName = therapistLower.split(' ')[0];
-                    
-                    services = services.filter(s => {
-                        // PRIORITY 1: Check TherapistName field directly (exact field from API)
-                        const therapistName = (s.TherapistName || '').toLowerCase().trim();
-                        if (therapistName) {
-                            // Exact match or partial match
-                            if (therapistName === therapistLower) return true;
-                            if (therapistName.includes(therapistLower)) return true;
-                            if (therapistLower.includes(therapistName)) return true;
-                            // First name match
-                            if (therapistName.includes(therapistFirstName)) return true;
-                            if (therapistName.split(' ')[0] === therapistFirstName) return true;
-                        }
-                        
-                        // PRIORITY 2: Check service Name for therapist pattern
-                        const serviceName = (s.Name || '').toLowerCase();
-                        if (serviceName.includes(therapistLower)) return true;
-                        if (serviceName.includes(therapistFirstName)) return true;
-                        
-                        // PRIORITY 3: Extract from service name pattern "Treatment - Therapist Name - Duration"
-                        const match = serviceName.match(/\s-\s([a-z]+(?:\s+[a-z]\.?)?(?:\s+[a-z]+)?)\s*(?:-|$|\d|\')/i);
-                        if (match) {
-                            const extractedName = match[1].toLowerCase().trim();
-                            if (extractedName === therapistFirstName) return true;
-                            if (extractedName.includes(therapistFirstName)) return true;
-                            if (therapistLower.includes(extractedName)) return true;
-                        }
-                        
-                        return false;
-                    });
-                    console.log('[RENDER DEBUG] After therapist filter:', services.length);
-                    
-                    // Debug: log what services passed the filter
-                    if (services.length > 0) {
-                        console.log('[RENDER DEBUG] Sample filtered services:', services.slice(0, 3).map(s => ({
-                            name: s.Name,
-                            therapistName: s.TherapistName
-                        })));
-                    } else {
-                        console.log('[RENDER DEBUG] WARNING: No services matched therapist filter!');
-                        console.log('[RENDER DEBUG] Sample service TherapistName values:', allServices.slice(0, 10).map(s => s.TherapistName));
-                    }
-                }
-                
-                // Time filtering applied during rendering
-                const selectedTime = filterTime ? filterTime.value : '';
-                console.log('[RENDER DEBUG] Time filter (for rendering):', selectedTime || 'none');
-                
-                // NEW: Filter by Time field (exact field from API)
-                if (selectedTime) {
-                    const filterHour = parseInt(selectedTime.split(':')[0], 10);
-                    console.log('[RENDER DEBUG] Filtering by time hour:', filterHour);
-                    
-                    services = services.filter(s => {
-                        // Use exact Time field from API (e.g., "11:00", "14:00")
-                        const slotTime = s.Time || '';
-                        if (!slotTime) return true; // Keep if no time (static catalog without time)
-                        
-                        const slotHour = parseInt(slotTime.split(':')[0], 10);
-                        // Match within 2 hours of selected time
-                        return Math.abs(slotHour - filterHour) <= 2;
-                    });
-                    console.log('[RENDER DEBUG] After time filter:', services.length);
-                }
-                
-                // NEW: Filter by Date field (exact field from API)
-                // Get selected dates from the date picker
+                // 3. DATE FILTER - exact Date field (YYYY-MM-DD)
                 const selectedDates = [];
                 document.querySelectorAll('.date-box.selected').forEach(box => {
-                    const dateStr = box.dataset.date; // Format: YYYY-MM-DD
-                    if (dateStr) selectedDates.push(dateStr);
+                    if (box.dataset.date) selectedDates.push(box.dataset.date);
                 });
-                
                 if (selectedDates.length > 0) {
-                    console.log('[RENDER DEBUG] Filtering by dates:', selectedDates);
-                    
                     services = services.filter(s => {
-                        // Use exact Date field from API (e.g., "2026-02-02")
-                        const slotDate = s.Date || '';
-                        if (!slotDate) return true; // Keep if no date (static catalog without date)
-                        
-                        return selectedDates.includes(slotDate);
+                        const svcDate = s.Date || '';
+                        return !svcDate || selectedDates.includes(svcDate);
                     });
-                    console.log('[RENDER DEBUG] After date filter:', services.length);
+                    console.log('[FILTER] After date:', services.length);
                 }
                 
-                // Group services by therapist + treatment name
-                const groupedByTherapistAndTreatment = {};
-                
-                services.forEach(service => {
-                    // Use exact Name field from API
-                    const serviceName = service.Name || '';
-                    
-                    // Use exact TherapistName field from API (prioritize this)
-                    let therapistName = (service.TherapistName || '').trim();
-                    
-                    // Fallback: extract from service name if TherapistName is empty
-                    if (!therapistName) {
-                        const therapistMatch = serviceName.match(/\s-\s([A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?)\s*(?:-|$|\d|\')/i);
-                        if (therapistMatch) {
-                            therapistName = therapistMatch[1].trim();
-                            if (/^\d+\s*(min|mins)?$/i.test(therapistName)) {
-                                therapistName = 'General';
-                            }
-                        } else {
-                            therapistName = 'General';
-                        }
-                    }
-                    
-                    // Use helper for duration
-                    const duration = safeGetDuration(service);
-                    
-                    let baseName = serviceName
-                        .replace(/\s*-\s*[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?\s*(?:-|$)/gi, ' ')
-                        .replace(/\s*-?\s*\d+\s*(?:min|mins|minutes|\')\s*/gi, '')
-                        .replace(/\s*-\s*\d+\s*$/g, '')
-                        .replace(/\s+/g, ' ')
-                        .trim();
-                    
-                    if (!baseName) baseName = serviceName;
-                    
-                    const groupKey = therapistName + '||' + baseName;
-                    
-                    if (!groupedByTherapistAndTreatment[groupKey]) {
-                        groupedByTherapistAndTreatment[groupKey] = {
-                            therapist: therapistName,
-                            baseName: baseName,
-                            category: service.Category || '',
-                            variants: []
-                        };
-                    }
-                    
-                    const existingDurations = groupedByTherapistAndTreatment[groupKey].variants.map(v => v.duration);
-                    if (!existingDurations.includes(duration) || duration === 0) {
-                        if (duration === 0 && existingDurations.includes(0)) {
-                            return;
-                        }
-                        
-                        groupedByTherapistAndTreatment[groupKey].variants.push({
-                            id: service.Id,
-                            duration: duration,
-                            price: parseFloat(service.Price) || 0,
-                            fullName: serviceName,
-                            service: service
-                        });
-                    }
-                });
-                
-                // Sort variants by duration
-                Object.values(groupedByTherapistAndTreatment).forEach(group => {
-                    const seen = new Set();
-                    group.variants = group.variants.filter(v => {
-                        if (seen.has(v.duration)) return false;
-                        seen.add(v.duration);
-                        return true;
+                // 4. TIME FILTER - exact Time field (HH:MM)
+                const selectedTime = filterTime ? filterTime.value : '';
+                if (selectedTime) {
+                    const filterHour = parseInt(selectedTime.split(':')[0], 10);
+                    services = services.filter(s => {
+                        const svcTime = s.Time || '';
+                        if (!svcTime) return true;
+                        const slotHour = parseInt(svcTime.split(':')[0], 10);
+                        return Math.abs(slotHour - filterHour) <= 2;
                     });
-                    group.variants.sort((a, b) => a.duration - b.duration);
-                });
+                    console.log('[FILTER] After time:', services.length);
+                }
                 
-                // FIX: Data is now synced with server before rendering
-                console.log('Rendering ' + Object.keys(groupedByTherapistAndTreatment).length + ' treatment groups');
-                renderServicesSchedule(groupedByTherapistAndTreatment);
-            }
-            
-            function renderServicesSchedule(groupedData) {
-                if (!scheduleContent) return;
-                
-                const groups = Object.values(groupedData);
-                
-                if (groups.length === 0) {
-                    // Check if therapist filter is active
-                    const therapistName = filterTherapist ? filterTherapist.value : '';
-                    const startDate = filterStartDate ? filterStartDate.value : '';
-                    const endDate = filterEndDate ? filterEndDate.value : '';
-                    
-                    let message = '<div class="hw-mbo-no-results"><h3>No Treatments Available</h3>';
-                    
-                    if (therapistName) {
-                        // Format dates for display
-                        let dateRange = '';
-                        if (startDate && endDate) {
-                            const start = new Date(startDate);
-                            const end = new Date(endDate);
-                            const options = { weekday: 'long', day: 'numeric', month: 'long' };
-                            dateRange = start.toLocaleDateString('en-GB', options) + ' to ' + end.toLocaleDateString('en-GB', options);
-                        }
-                        
-                        message += '<p><strong>' + escapeHtml(therapistName) + '</strong> has no availability';
-                        if (dateRange) {
-                            message += ' between ' + dateRange;
-                        }
-                        message += '.</p>';
-                        message += '<p>Please try different dates or select another therapist.</p>';
-                    } else {
-                        message += '<p>Try adjusting your filters to find available treatments.</p>';
-                    }
-                    
-                    message += '</div>';
-                    scheduleContent.innerHTML = message;
+                // 5. CHECK FOR NO RESULTS
+                if (services.length === 0) {
+                    renderNoResults();
                     return;
                 }
                 
-                const byTherapist = {};
-                groups.forEach(group => {
-                    if (!byTherapist[group.therapist]) {
-                        byTherapist[group.therapist] = [];
+                // 6. GROUP BY TherapistName + Treatment base name
+                const grouped = {};
+                services.forEach(service => {
+                    const therapist = (service.TherapistName || 'General').trim();
+                    const baseName = cleanTreatmentName(service.Name || '');
+                    const key = therapist + '||' + baseName;
+                    
+                    if (!grouped[key]) {
+                        grouped[key] = {
+                            therapist: therapist,
+                            baseName: baseName,
+                            category: service.Category || '',
+                            slots: []
+                        };
                     }
-                    byTherapist[group.therapist].push(group);
+                    
+                    // Add slot with all booking info
+                    grouped[key].slots.push({
+                        id: service.Id,
+                        date: service.Date,
+                        time: service.Time,
+                        startDateTime: service.StartDateTime,
+                        price: parseFloat(service.Price) || 0,
+                        duration: parseInt(service.Duration) || 0,
+                        fullName: service.Name,
+                        therapistPhoto: service.TherapistPhoto || ''
+                    });
                 });
                 
-                const therapistNames = Object.keys(byTherapist).sort();
+                console.log('[RENDER] Rendering', Object.keys(grouped).length, 'treatment groups');
+                renderGroupedServices(grouped);
+            }
+            
+            /**
+             * Clean treatment name - remove therapist and duration
+             */
+            function cleanTreatmentName(name) {
+                return name
+                    .replace(/\s*-\s*[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:\s+[A-Z][a-z]+)?\s*(?:-|$)/gi, ' ')
+                    .replace(/\s*-?\s*\d+\s*(?:min|mins|minutes|\')\s*/gi, '')
+                    .replace(/\s+/g, ' ')
+                    .trim() || name;
+            }
+            
+            /**
+             * Render "No availability" message
+             */
+            function renderNoResults() {
+                if (!scheduleContent) return;
                 
-                let html = '';
+                const therapist = filterTherapist ? filterTherapist.value : '';
+                let msg = '<div class="hw-mbo-no-results">';
+                msg += '<h3>No Availability Found</h3>';
                 
-                const now = new Date();
-                const todayYear = now.getFullYear();
-                const todayMonth = now.getMonth();
-                const todayDay = now.getDate();
-                const today = new Date(todayYear, todayMonth, todayDay, 12, 0, 0);
-                
-                function parseLocalDate(dateStr) {
-                    if (!dateStr) return null;
-                    const parts = dateStr.split('-');
-                    const year = parseInt(parts[0], 10);
-                    const month = parseInt(parts[1], 10) - 1;
-                    const day = parseInt(parts[2], 10);
-                    return new Date(year, month, day, 12, 0, 0);
-                }
-                
-                let startDate, endDate;
-                
-                if (filterStartDate && filterStartDate.value) {
-                    startDate = parseLocalDate(filterStartDate.value);
+                if (therapist) {
+                    msg += '<p><strong>' + escapeHtml(therapist) + '</strong> has no available slots for this selection.</p>';
                 } else {
-                    startDate = new Date(todayYear, todayMonth, todayDay, 12, 0, 0);
+                    msg += '<p>No treatments match your current filters.</p>';
                 }
                 
-                if (filterEndDate && filterEndDate.value) {
-                    endDate = parseLocalDate(filterEndDate.value);
-                } else {
-                    endDate = new Date(todayYear, todayMonth, todayDay + daysToShow - 1, 12, 0, 0);
-                }
+                msg += '<p>Please try another date or therapist.</p>';
+                msg += '</div>';
                 
-                const daysDiff = Math.round((endDate - startDate) / (1000 * 60 * 60 * 24)) + 1;
-                const maxDays = Math.min(daysDiff, daysToShow);
+                scheduleContent.innerHTML = msg;
+            }
+            
+            /**
+             * Render grouped services into the schedule table
+             */
+            function renderGroupedServices(grouped) {
+                if (!scheduleContent) return;
                 
-                for (let dayOffset = 0; dayOffset < maxDays; dayOffset++) {
-                    const currentDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + dayOffset, 12, 0, 0);
-                    
-                    if (currentDate > endDate) continue;
-                    
-                    // Format date as YYYY-MM-DD for availability lookup
-                    const dateKey = currentDate.getFullYear() + '-' + 
-                        String(currentDate.getMonth() + 1).padStart(2, '0') + '-' + 
-                        String(currentDate.getDate()).padStart(2, '0');
-                    
-                    const dayName = currentDate.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase();
-                    
-                    // Check if we have availability data for this day
-                    let daySlots = [];
-                    let availableStaffOnDay = new Set();
-                    let availableTimesOnDay = {};
-                    
-                    if (availabilityData && availabilityData.slots_by_date && availabilityData.slots_by_date[dateKey]) {
-                        daySlots = availabilityData.slots_by_date[dateKey];
-                        console.log('[RENDER] Day ' + dateKey + ' has ' + daySlots.length + ' slots from API');
+                // Group by therapist
+                const byTherapist = {};
+                Object.values(grouped).forEach(g => {
+                    if (!byTherapist[g.therapist]) byTherapist[g.therapist] = [];
+                    byTherapist[g.therapist].push(g);
+                });
+                
+                const therapists = Object.keys(byTherapist).sort();
+                
+                let html = '<div class="hw-mbo-day-section">';
+                html += '<div class="hw-mbo-table-wrapper">';
+                html += '<table class="hw-mbo-table">';
+                html += '<thead><tr>';
+                html += '<th>Therapist</th><th>Treatment</th><th>Date</th><th>Time</th><th>Duration</th><th>Price</th><th></th>';
+                html += '</tr></thead><tbody>';
+                
+                therapists.forEach(therapist => {
+                    byTherapist[therapist].forEach(treatment => {
+                        // Get unique slots sorted by date/time
+                        const slots = treatment.slots.sort((a, b) => {
+                            if (a.date !== b.date) return (a.date || '').localeCompare(b.date || '');
+                            return (a.time || '').localeCompare(b.time || '');
+                        });
                         
-                        // Build set of available staff and their times for this day
-                        // Use helper functions to handle API property inconsistencies
-                        daySlots.forEach(slot => {
-                            // Handle various possible property names for staff name
-                            const staffName = (slot.staff_name || slot.StaffName || slot.staffName || 
-                                              (slot.Staff && slot.Staff.Name) || '').toLowerCase();
-                            if (staffName) {
-                                availableStaffOnDay.add(staffName);
-                                // Track actual times
-                                if (!availableTimesOnDay[staffName]) {
-                                    availableTimesOnDay[staffName] = [];
-                                }
-                                // Handle various possible property names for start time
-                                const startTime = slot.start_time || slot.StartDateTime || slot.startDateTime || '';
-                                if (startTime) {
-                                    const timeStr = startTime.includes('T') ? startTime.split('T')[1] : startTime;
-                                    if (timeStr) {
-                                        availableTimesOnDay[staffName].push(timeStr.substring(0, 5));
-                                    }
-                                }
-                            }
-                        });
-                        console.log('[RENDER] Available staff on ' + dateKey + ':', Array.from(availableStaffOnDay));
-                    }
-                    
-                    // Filter therapists for this day if we have availability data
-                    let therapistsForDay = therapistNames;
-                    if (availabilityData && availabilityData.dates && availabilityData.dates.length > 0) {
-                        // We have availability data - filter to only show available staff
-                        therapistsForDay = therapistNames.filter(name => {
-                            const nameLower = name.toLowerCase();
-                            const firstName = name.split(' ')[0].toLowerCase();
-                            // Check if this therapist is available on this day
-                            return availableStaffOnDay.has(nameLower) || 
-                                   availableStaffOnDay.has(firstName) ||
-                                   Array.from(availableStaffOnDay).some(s => s.includes(firstName) || firstName.includes(s.split(' ')[0]));
-                        });
-                        console.log('[RENDER] Filtered therapists for ' + dateKey + ': ' + therapistsForDay.length + ' of ' + therapistNames.length);
-                    }
-                    
-                    // Skip this day if no therapists are available
-                    if (therapistsForDay.length === 0 && availabilityData && availabilityData.dates && availabilityData.dates.length > 0) {
-                        console.log('[RENDER] Skipping day ' + dateKey + ' - no available therapists');
-                        continue;
-                    }
-                    
-                    html += '<div class="hw-mbo-day-section">';
-                    html += '<div class="hw-mbo-day-header"><h3>' + escapeHtml(dayName) + '</h3></div>';
-                    html += '<div class="hw-mbo-table-wrapper">';
-                    html += '<table class="hw-mbo-table">';
-                    html += '<thead><tr>';
-                    html += '<th>Therapist</th>';
-                    html += '<th>Treatment</th>';
-                    html += '<th>Location</th>';
-                    html += '<th>Duration</th>';
-                    html += '<th>Start Time</th>';
-                    html += '<th>Price/Package</th>';
-                    html += '<th>Availability</th>';
-                    html += '</tr></thead><tbody>';
-                    
-                    therapistsForDay.forEach(therapistName => {
-                        const treatments = byTherapist[therapistName];
-                        if (!treatments) return;
+                        // Take first slot as default
+                        const slot = slots[0];
+                        const photo = slot.therapistPhoto;
+                        const initials = therapist.split(' ').map(n => n[0]).join('').substring(0, 2);
                         
-                        treatments.forEach(treatment => {
-                            const variants = treatment.variants;
-                            const defaultVariant = variants[0];
-                            
-                            let durationHtml = '';
-                            if (variants.length > 1) {
-                                durationHtml = '<select class="hw-mbo-duration-select" data-treatment-key="' + escapeHtml(therapistName + '||' + treatment.baseName) + '">';
-                                variants.forEach((v, idx) => {
-                                    durationHtml += '<option value="' + v.id + '" data-price="' + v.price + '" data-duration="' + v.duration + '"' + (idx === 0 ? ' selected' : '') + '>' + v.duration + ' min</option>';
-                                });
-                                durationHtml += '</select>';
-                            } else {
-                                durationHtml = (defaultVariant.duration || '-') + ' min';
-                            }
-                            
-                            // Generate time slots - use actual availability if we have it
-                            const allTimeSlots = ['06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00'];
-                            let availableTimes = [];
-                            
-                            // Check if we have actual times from availability API for this therapist
-                            const therapistLower = therapistName.toLowerCase();
-                            const therapistFirst = therapistName.split(' ')[0].toLowerCase();
-                            let actualTimes = null;
-                            
-                            // Find matching staff in availableTimesOnDay
-                            for (const [staffKey, times] of Object.entries(availableTimesOnDay)) {
-                                if (staffKey.includes(therapistFirst) || therapistFirst.includes(staffKey.split(' ')[0])) {
-                                    actualTimes = times;
-                                    break;
-                                }
-                            }
-                            
-                            if (actualTimes && actualTimes.length > 0) {
-                                // Use actual available times from API
-                                availableTimes = [...new Set(actualTimes)].sort();
-                                console.log('[RENDER] Using actual times for ' + therapistName + ' on ' + dateKey + ':', availableTimes);
-                            } else {
-                                // Fall back to filter-based times
-                                const selectedTimeFilter = filterTime ? filterTime.value : '';
-                                
-                                if (selectedTimeFilter) {
-                                    // Filter times to only show times >= selected time
-                                    const filterHour = parseInt(selectedTimeFilter.split(':')[0], 10);
-                                    availableTimes = allTimeSlots.filter(t => {
-                                        const slotHour = parseInt(t.split(':')[0], 10);
-                                        return slotHour >= filterHour;
-                                    });
-                                    // Take first 4 available slots after filter
-                                    availableTimes = availableTimes.slice(0, 4);
-                                } else {
-                                    // No filter - show business hours (9am-5pm)
-                                    availableTimes = ['09:00', '10:00', '11:00', '12:00', '14:00', '15:00', '16:00', '17:00'];
-                                }
-                            }
-                            
-                            // Ensure we have at least some times
-                            if (availableTimes.length === 0) {
-                                availableTimes = ['18:00', '19:00', '20:00'];
-                            }
-                            
-                            const serviceData = {
-                                id: defaultVariant.id,
-                                name: treatment.baseName,
-                                therapist: therapistName,
-                                price: defaultVariant.price,
-                                duration: defaultVariant.duration,
-                                location: defaultLocation,
-                                variants: variants
-                            };
-                            
-                            const therapistPhoto = therapistPhotos[therapistName] || '';
-                            const photoHtml = therapistPhoto 
-                                ? '<img src="' + escapeHtml(therapistPhoto) + '" alt="' + escapeHtml(therapistName) + '" class="hw-mbo-therapist-photo" onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'inline-flex\';" /><span class="hw-mbo-therapist-initials" style="display:none;">' + escapeHtml(therapistName.split(' ').map(n => n.charAt(0)).join('').substring(0,2)) + '</span>'
-                                : '<span class="hw-mbo-therapist-initials">' + escapeHtml(therapistName.split(' ').map(n => n.charAt(0)).join('').substring(0,2)) + '</span>';
-                            
-                            html += '<tr data-treatment-key="' + escapeHtml(therapistName + '||' + treatment.baseName) + '">';
-                            html += '<td class="hw-mbo-therapist-cell"><div class="hw-mbo-therapist-info">' + photoHtml + '<a href="#" class="hw-mbo-therapist-name" data-staff-name="' + escapeHtml(therapistName) + '">' + escapeHtml(therapistName) + ' | Therapist</a></div></td>';
-                            html += '<td><a href="#" class="hw-mbo-treatment-name" data-session-type-id="' + defaultVariant.id + '" data-session-type-name="' + escapeHtml(treatment.baseName) + '">' + escapeHtml(treatment.baseName) + '</a></td>';
-                            html += '<td class="hw-mbo-location">' + escapeHtml(defaultLocation) + '</td>';
-                            html += '<td class="hw-mbo-duration-cell">' + durationHtml + '</td>';
-                            html += '<td><select class="hw-mbo-time-select">' + availableTimes.map(t => '<option value="' + t + '">' + t + '</option>').join('') + '</select></td>';
-                            html += '<td class="hw-mbo-price" data-base-price="' + defaultVariant.price + '">£' + parseFloat(defaultVariant.price).toFixed(0) + '</td>';
-                            html += '<td><button class="hw-mbo-book-btn" data-service=\'' + JSON.stringify(serviceData).replace(/'/g, "&#39;") + '\'>Book Now</button></td>';
-                            html += '</tr>';
-                        });
+                        // Photo HTML
+                        const photoHtml = photo 
+                            ? '<img src="' + escapeHtml(photo) + '" alt="" class="hw-mbo-therapist-photo" onerror="this.style.display=\'none\'">'
+                            : '<span class="hw-mbo-therapist-initials">' + escapeHtml(initials) + '</span>';
+                        
+                        // Time dropdown if multiple slots
+                        let timeHtml = slot.time || '-';
+                        if (slots.length > 1) {
+                            timeHtml = '<select class="hw-mbo-time-select" data-slot-data=\'' + JSON.stringify(slots).replace(/'/g, "&#39;") + '\'>';
+                            slots.forEach((s, i) => {
+                                const label = (s.date ? s.date.substring(5) + ' ' : '') + (s.time || '');
+                                timeHtml += '<option value="' + i + '"' + (i === 0 ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+                            });
+                            timeHtml += '</select>';
+                        }
+                        
+                        // Build row
+                        html += '<tr>';
+                        html += '<td class="hw-mbo-therapist-cell"><div class="hw-mbo-therapist-info">' + photoHtml + '<span>' + escapeHtml(therapist) + '</span></div></td>';
+                        html += '<td>' + escapeHtml(treatment.baseName) + '</td>';
+                        html += '<td>' + escapeHtml(slot.date || '-') + '</td>';
+                        html += '<td>' + timeHtml + '</td>';
+                        html += '<td>' + (slot.duration || '-') + ' min</td>';
+                        html += '<td class="hw-mbo-price">£' + slot.price.toFixed(0) + '</td>';
+                        html += '<td><button class="hw-mbo-book-btn" data-id="' + escapeHtml(slot.id) + '" data-datetime="' + escapeHtml(slot.startDateTime || '') + '">Book Now</button></td>';
+                        html += '</tr>';
                     });
-                    
-                    html += '</tbody></table></div></div>';
-                }
+                });
                 
+                html += '</tbody></table></div></div>';
                 scheduleContent.innerHTML = html;
                 
-                // FIX: Event delegation is now used in setupEventListeners()
-                // These individual listeners are kept as backup for non-delegated elements
-                document.querySelectorAll('.hw-mbo-therapist-name').forEach(el => {
-                    el.addEventListener('click', handleTherapistClick);
-                });
-                
-                document.querySelectorAll('.hw-mbo-treatment-name').forEach(el => {
-                    el.addEventListener('click', handleTreatmentClick);
-                });
-                
-                // FIX: Book Now buttons now use event delegation - see setupEventListeners()
-                // Individual listeners removed to prevent double-firing
-                
-                document.querySelectorAll('.hw-mbo-duration-select').forEach(select => {
-                    select.addEventListener('change', handleDurationChange);
+                // Add event listeners for time select changes
+                document.querySelectorAll('.hw-mbo-time-select').forEach(select => {
+                    select.addEventListener('change', function() {
+                        const slots = JSON.parse(this.dataset.slotData.replace(/&#39;/g, "'"));
+                        const slot = slots[this.value];
+                        const row = this.closest('tr');
+                        const btn = row.querySelector('.hw-mbo-book-btn');
+                        if (btn && slot) {
+                            btn.dataset.id = slot.id;
+                            btn.dataset.datetime = slot.startDateTime || '';
+                            row.querySelector('.hw-mbo-price').textContent = '£' + slot.price.toFixed(0);
+                        }
+                    });
                 });
             }
+            
+            /* renderServicesSchedule - Replaced by renderGroupedServices */
             
             function handleDurationChange(e) {
                 const select = e.target;
@@ -1668,29 +1392,39 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     return;
                 }
                 
-                const serviceData = JSON.parse(e.target.dataset.service.replace(/&#39;/g, "'"));
-                const row = e.target.closest('tr');
-                const timeSelect = row ? row.querySelector('.hw-mbo-time-select') : null;
-                const selectedTime = timeSelect ? timeSelect.value : '10:00';
+                // Get booking data from new clean attributes
+                const btn = e.target;
+                const serviceId = btn.dataset.id;
+                const startDateTime = btn.dataset.datetime;
+                const row = btn.closest('tr');
                 
-                const daySection = e.target.closest('.hw-mbo-day-section');
-                const dayHeader = daySection ? daySection.querySelector('.hw-mbo-day-header h3') : null;
-                const selectedDate = dayHeader ? dayHeader.textContent : 'Today';
+                // Get values from the row
+                const therapist = row ? row.querySelector('.hw-mbo-therapist-cell')?.textContent?.trim() : '';
+                const treatment = row ? row.querySelectorAll('td')[1]?.textContent?.trim() : '';
+                const date = row ? row.querySelectorAll('td')[2]?.textContent?.trim() : '';
+                const duration = row ? row.querySelectorAll('td')[4]?.textContent?.trim() : '';
+                const price = row ? row.querySelector('.hw-mbo-price')?.textContent?.replace('£','') : '0';
+                
+                // Get selected time from dropdown or cell
+                const timeSelect = row ? row.querySelector('.hw-mbo-time-select') : null;
+                const selectedTime = timeSelect ? 
+                    (timeSelect.options ? timeSelect.options[timeSelect.selectedIndex].text : timeSelect.textContent) :
+                    (row ? row.querySelectorAll('td')[3]?.textContent?.trim() : '');
                 
                 if (modalTitle) modalTitle.textContent = 'Book Appointment';
                 if (modalBody) {
                     modalBody.innerHTML = 
                         '<div class="hw-mbo-modal-details">' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Treatment:</div><div class="hw-mbo-modal-value">' + escapeHtml(serviceData.name) + '</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Therapist:</div><div class="hw-mbo-modal-value">' + escapeHtml(serviceData.therapist) + '</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Date:</div><div class="hw-mbo-modal-value">' + escapeHtml(selectedDate) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Treatment:</div><div class="hw-mbo-modal-value">' + escapeHtml(treatment) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Therapist:</div><div class="hw-mbo-modal-value">' + escapeHtml(therapist) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Date:</div><div class="hw-mbo-modal-value">' + escapeHtml(date) + '</div></div>' +
                         '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Time:</div><div class="hw-mbo-modal-value">' + escapeHtml(selectedTime) + '</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Duration:</div><div class="hw-mbo-modal-value">' + (serviceData.duration || '-') + ' min</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Location:</div><div class="hw-mbo-modal-value">' + escapeHtml(serviceData.location) + '</div></div>' +
-                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Price:</div><div class="hw-mbo-modal-value hw-mbo-price">£' + parseFloat(serviceData.price).toFixed(2) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Duration:</div><div class="hw-mbo-modal-value">' + escapeHtml(duration) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Location:</div><div class="hw-mbo-modal-value">' + escapeHtml(defaultLocation) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Price:</div><div class="hw-mbo-modal-value hw-mbo-price">£' + parseFloat(price).toFixed(2) + '</div></div>' +
                         '</div>' +
                         '<div class="hw-mbo-modal-action">' +
-                        '<button class="hw-mbo-book-btn hw-mbo-add-to-cart-btn" id="hw-confirm-booking" data-service-id="' + serviceData.id + '" data-price="' + serviceData.price + '" data-name="' + escapeHtml(serviceData.name) + '" data-therapist="' + escapeHtml(serviceData.therapist) + '" data-time="' + escapeHtml(selectedTime) + '" data-date="' + escapeHtml(selectedDate) + '">Add to Cart & Checkout</button>' +
+                        '<button class="hw-mbo-book-btn hw-mbo-add-to-cart-btn" id="hw-confirm-booking" data-service-id="' + escapeHtml(serviceId) + '" data-datetime="' + escapeHtml(startDateTime) + '" data-price="' + price + '" data-name="' + escapeHtml(treatment) + '" data-therapist="' + escapeHtml(therapist) + '" data-time="' + escapeHtml(selectedTime) + '" data-date="' + escapeHtml(date) + '">Add to Cart & Checkout</button>' +
                         '</div>';
                 }
                 if (detailModal) detailModal.classList.add('open');
