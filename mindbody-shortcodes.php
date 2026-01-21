@@ -263,25 +263,16 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 return year + '-' + month + '-' + day;
             }
             
-            // ROLLING WINDOW: Set default dates to TODAY + 2 DAYS
+            // CATALOG MODEL: No default date range needed
             const today = new Date();
-            today.setHours(12, 0, 0, 0); // Use NOON to avoid any timezone edge cases
+            today.setHours(12, 0, 0, 0);
+            
+            // Set min date for calendar picker (for preferred date selection)
             const todayStr = formatDateLocal(today);
-            
-            // End date is always +2 days from today for rolling window
-            const endDateDefault = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 2, 12, 0, 0);
-            
-            console.log('=== INITIAL DATE RANGE (AUTO-LOAD) ===');
-            console.log('Start Date:', todayStr);
-            console.log('End Date (+2 days):', formatDateLocal(endDateDefault));
-            
-            // FIX v1.3.0: Set min date to today to prevent selecting past dates
             if (filterStartDate) {
-                filterStartDate.value = todayStr;
                 filterStartDate.min = todayStr;
             }
             if (filterEndDate) {
-                filterEndDate.value = formatDateLocal(endDateDefault);
                 filterEndDate.min = todayStr;
             }
             
@@ -400,28 +391,17 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 
                 const clickedDate = new Date(dateStr + 'T00:00:00');
                 
-                // ROLLING WINDOW +2 DAY LOGIC
+                // CATALOG MODEL: Date selection is for "preferred date" only, not for fetching
                 calendarStartDate = clickedDate;
-                
-                // Automatically set end date to +2 days from start
-                const endDate = new Date(clickedDate);
-                endDate.setDate(endDate.getDate() + 2);
-                calendarEndDate = endDate;
-                
-                console.log('=== DATE SELECTION ===');
-                console.log('Start Date:', formatDateLocal(calendarStartDate));
-                console.log('End Date (auto +2 days):', formatDateLocal(calendarEndDate));
+                calendarEndDate = clickedDate;
                 
                 updateDateDisplay();
                 renderCalendars();
                 
-                // Close popup and AUTO-FETCH with new date range
+                // Close popup (NO AUTO-FETCH - catalog doesn't need it)
                 setTimeout(() => {
                     if (calendarPopup) calendarPopup.classList.remove('open');
                     if (dateDisplayTrigger) dateDisplayTrigger.classList.remove('active');
-                    
-                    console.log('=== AUTO-FETCHING WITH NEW DATE RANGE ===');
-                    loadAllServices().then(() => loadAvailability());
                 }, 300);
             }
             
@@ -484,13 +464,11 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 }
             });
             
-            // Initialize date display
-            updateDateDisplay();
-            // End Dual Month Calendar Picker
-            
             init();
             
             async function init() {
+                console.log('=== INITIALIZING CATALOG-BASED BOOKING SYSTEM ===');
+                
                 await Promise.all([
                     loadAllServices(),
                     loadTherapists()
@@ -503,15 +481,10 @@ function hw_mindbody_appointments_shortcode( $atts ) {
             
             async function loadAllServices() {
                 try {
-                    // Get current date range from filters
-                    const startDate = filterStartDate ? filterStartDate.value : formatDateLocal(new Date());
-                    const endDate = filterEndDate ? filterEndDate.value : formatDateLocal(new Date(Date.now() + 2 * 24 * 60 * 60 * 1000));
+                    console.log('\n=== FETCHING SERVICE CATALOG ===');
                     
-                    console.log('\n=== FETCHING BOOKABLE SLOTS ===');
-                    console.log('Date Range:', startDate, 'to', endDate);
-                    
-                    // Fetch LIVE bookable slots with dynamic date range
-                    const url = baseUrl + 'treatment-services?start_date=' + encodeURIComponent(startDate) + '&end_date=' + encodeURIComponent(endDate);
+                    // Fetch service catalog (NO date range - this is catalog-based)
+                    const url = baseUrl + 'treatment-services';
                     console.log('API URL:', url);
                     
                     const response = await fetch(url);
@@ -534,37 +507,43 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                         console.error('Message:', data.message || 'No details provided');
                         allServices = [];
                         if (errorState) {
-                            errorState.textContent = data.error;
+                            errorState.textContent = data.error + ': ' + (data.message || '');
                             errorState.style.display = 'block';
                         }
                         return;
                     }
                     
-                    // Get slots from response (NEW API structure)
-                    if (data.slots && Array.isArray(data.slots)) {
-                        allServices = data.slots;
+                    // CATALOG MODEL - services are organized by category
+                    if (data.services_by_category && typeof data.services_by_category === 'object') {
+                        // Flatten services from categories
+                        allServices = [];
+                        for (const category in data.services_by_category) {
+                            const categoryServices = data.services_by_category[category];
+                            allServices = allServices.concat(categoryServices);
+                        }
                         
                         // Build therapist photos lookup
-                        allServices.forEach(slot => {
-                            if (slot.TherapistName && slot.TherapistPhoto) {
-                                therapistPhotos[slot.TherapistName] = slot.TherapistPhoto;
+                        allServices.forEach(service => {
+                            if (service.TherapistName && service.TherapistPhoto) {
+                                therapistPhotos[service.TherapistName] = service.TherapistPhoto;
                             }
                         });
                         
-                        console.log('\n=== ✓ DATA LOADED SUCCESSFULLY ===');
-                        console.log('Total Slots:', allServices.length);
-                        console.log('Date Range:', data.date_range ? (data.date_range.start + ' to ' + data.date_range.end) : (startDate + ' to ' + endDate));
-                        console.log('Data Source:', data.data_source || 'unknown');
-                        console.log('Therapists with Photos:', Object.keys(therapistPhotos).length);
+                        console.log('\n=== ✓ SERVICE CATALOG LOADED ===');
+                        console.log('Booking Model:', data.model || 'catalog');
+                        console.log('Total Services:', allServices.length);
+                        console.log('Categories:', data.categories ? data.categories.join(', ') : 'N/A');
+                        console.log('Therapists:', data.therapists ? data.therapists.length : 0);
+                        console.log('Note:', data.note || 'Catalog-based booking');
                         
                         if (allServices.length > 0) {
-                            console.log('Sample Slot:', allServices[0]);
+                            console.log('Sample Service:', allServices[0]);
                         } else {
-                            console.warn('⚠️ API returned 0 slots - No appointments available in Mindbody for this date range');
+                            console.warn('⚠️ No services in catalog');
                         }
                     } else {
                         console.error('❌ UNEXPECTED API STRUCTURE');
-                        console.error('Expected data.slots array, got:', typeof data.slots);
+                        console.error('Expected data.services_by_category object, got:', typeof data.services_by_category);
                         console.error('Full response:', data);
                         allServices = [];
                     }
@@ -806,85 +785,59 @@ function hw_mindbody_appointments_shortcode( $atts ) {
             }
             
             
-            // NEW FILTERING LOGIC - Works with live bookable slots
+            // CATALOG FILTERING - Filter by category, therapist, service name
             async function loadServicesSchedule() {
-                let slots = [...allServices];
+                let services = [...allServices];
                 
-                console.log('=== FILTERING SLOTS ===');
-                console.log('Initial slots: ' + slots.length);
+                console.log('=== FILTERING SERVICE CATALOG ===');
+                console.log('Initial services: ' + services.length);
                 
-                // Filter by selected categories (use Category field from API)
+                // Filter by selected categories
                 if (selectedCategories.size > 0) {
-                    slots = slots.filter(slot => {
-                        const slotCategory = slot.Category || '';
+                    services = services.filter(service => {
+                        const serviceCategory = service.Category || '';
                         for (const cat of selectedCategories) {
-                            if (slotCategory.toLowerCase().includes(cat.toLowerCase()) ||
-                                cat.toLowerCase().includes(slotCategory.toLowerCase())) {
+                            if (serviceCategory.toLowerCase().includes(cat.toLowerCase()) ||
+                                cat.toLowerCase().includes(serviceCategory.toLowerCase())) {
                                 return true;
                             }
                         }
                         return false;
                     });
-                    console.log('After category filter: ' + slots.length);
+                    console.log('After category filter: ' + services.length);
                 }
                 
-                // Filter by selected services
+                // Filter by selected specific services
                 if (selectedServices.size > 0) {
                     const selectedIds = Array.from(selectedServices);
-                    slots = slots.filter(slot => selectedIds.includes(String(slot.SessionTypeId)));
-                    console.log('After service filter: ' + slots.length);
+                    services = services.filter(service => selectedIds.includes(String(service.ServiceId)));
+                    console.log('After service filter: ' + services.length);
                 }
                 
-                // Filter by therapist name (use TherapistName field from API)
+                // Filter by therapist name
                 const selectedTherapistName = filterTherapist ? filterTherapist.value : '';
                 if (selectedTherapistName) {
-                    slots = slots.filter(slot => {
-                        const therapist = (slot.TherapistName || '').toLowerCase();
+                    services = services.filter(service => {
+                        const therapist = (service.TherapistName || '').toLowerCase();
                         return therapist.includes(selectedTherapistName.toLowerCase());
                     });
-                    console.log('After therapist filter: ' + slots.length);
+                    console.log('After therapist filter: ' + services.length);
                 }
                 
-                // Filter by date (use Date field from API - YYYY-MM-DD format)
-                if (filterStartDate && filterStartDate.value) {
-                    slots = slots.filter(slot => {
-                        return slot.Date >= filterStartDate.value;
-                    });
-                    console.log('After start date filter: ' + slots.length);
-                }
+                console.log('Final filtered services: ' + services.length);
                 
-                if (filterEndDate && filterEndDate.value) {
-                    slots = slots.filter(slot => {
-                        return slot.Date <= filterEndDate.value;
-                    });
-                    console.log('After end date filter: ' + slots.length);
-                }
-                
-                // Filter by time (use Time field from API - HH:mm format)
-                const selectedTime = filterTime ? filterTime.value : '';
-                if (selectedTime) {
-                    const selectedHour = parseInt(selectedTime.split(':')[0]);
-                    slots = slots.filter(slot => {
-                        const slotHour = parseInt((slot.Time || '').split(':')[0]);
-                        return slotHour >= selectedHour;
-                    });
-                    console.log('After time filter: ' + slots.length);
-                }
-                
-                console.log('Final filtered slots: ' + slots.length);
-                
-                renderSlotsSchedule(slots);
+                renderSlotsSchedule(services);
             }
             
-            // NEW RENDERING LOGIC - Displays slots grouped by date
-            function renderSlotsSchedule(slots) {
-                console.log('=== RENDER SLOTS SCHEDULE ===');
-                console.log('Data received:', slots);
-                console.log('Total slots to render:', slots.length);
+            // CATALOG RENDERING - Display services as cards, not time slots
+            function renderSlotsSchedule(services) {
+                console.log('=== RENDER SERVICE CATALOG ===');
+                console.log('Data received:', services);
+                console.log('Total services to render:', services.length);
                 
-                if (slots.length > 0) {
-                    console.log('Sample slot structure:', slots[0]);
-                    console.log('Keys in first slot:', Object.keys(slots[0]));
+                if (services.length > 0) {
+                    console.log('Sample service structure:', services[0]);
+                    console.log('Keys in first service:', Object.keys(services[0]));
                 }
                 
                 if (!scheduleContent) {
@@ -892,102 +845,96 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     return;
                 }
                 
-                if (slots.length === 0) {
-                    console.warn('No slots to display - showing empty message');
-                    scheduleContent.innerHTML = '<div class="hw-mbo-no-results"><h3>No Appointments Available</h3><p>Try adjusting your filters or selecting a different date range.</p></div>';
+                if (services.length === 0) {
+                    console.warn('No services to display - showing empty message');
+                    scheduleContent.innerHTML = '<div class="hw-mbo-no-results"><h3>No Services Available</h3><p>Try adjusting your filters or contact us to book an appointment.</p></div>';
                     return;
                 }
                 
-                // Group slots by date
-                const slotsByDate = {};
-                slots.forEach(slot => {
-                    const date = slot.Date || '';
-                    if (!slotsByDate[date]) {
-                        slotsByDate[date] = [];
+                // Group services by category
+                const servicesByCategory = {};
+                services.forEach(service => {
+                    const category = service.Category || 'Other Services';
+                    if (!servicesByCategory[category]) {
+                        servicesByCategory[category] = [];
                     }
-                    slotsByDate[date].push(slot);
+                    servicesByCategory[category].push(service);
                 });
-                
-                // Sort dates
-                const dates = Object.keys(slotsByDate).sort();
                 
                 let html = '';
                 
-                dates.forEach(dateStr => {
-                    const dateObj = new Date(dateStr + 'T12:00:00');
-                    const dayName = dateObj.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase();
+                // Render each category
+                for (const category in servicesByCategory) {
+                    const categoryServices = servicesByCategory[category];
                     
-                    html += '<div class="hw-mbo-day-section">';
-                    html += '<div class="hw-mbo-day-header"><h3>' + escapeHtml(dayName) + '</h3></div>';
-                    html += '<div class="hw-mbo-table-wrapper">';
-                    html += '<table class="hw-mbo-table">';
-                    html += '<thead><tr>';
-                    html += '<th>Time</th>';
-                    html += '<th>Therapist</th>';
-                    html += '<th>Service</th>';
-                    html += '<th>Price</th>';
-                    html += '<th>Action</th>';
-                    html += '</tr></thead><tbody>';
+                    html += '<div class="hw-mbo-category-section-display">';
+                    html += '<h3 class="hw-mbo-category-title">' + escapeHtml(category) + '</h3>';
+                    html += '<div class="hw-mbo-services-grid">';
                     
-                    // Sort slots by time
-                    const daySlots = slotsByDate[dateStr].sort((a, b) => {
-                        return (a.Time || '').localeCompare(b.Time || '');
-                    });
-                    
-                    daySlots.forEach(slot => {
-                        const therapistPhoto = slot.TherapistPhoto || therapistPhotos[slot.TherapistName] || '';
-                        const therapistName = slot.TherapistName || 'Available';
-                        const serviceName = slot.Name || 'Appointment';
-                        const price = parseFloat(slot.Price) || 0;
-                        const time = slot.Time || '';
-                        const duration = slot.Duration || 0;
+                    categoryServices.forEach(service => {
+                        const serviceId = service.ServiceId || service.Id;
+                        const serviceName = service.Name || 'Service';
+                        const price = parseFloat(service.Price) || 0;
+                        const duration = service.Duration || 60;
+                        const therapistName = service.TherapistName || '';
+                        const therapistPhoto = service.TherapistPhoto || therapistPhotos[therapistName] || '';
+                        const description = service.Description || '';
                         
-                        html += '<tr>';
+                        html += '<div class="hw-mbo-service-card">';
                         
-                        // Time column
-                        html += '<td class="hw-mbo-time">';
-                        html += '<strong>' + escapeHtml(time) + '</strong>';
+                        // Service header
+                        html += '<div class="hw-mbo-service-header">';
+                        html += '<h4 class="hw-mbo-service-name">' + escapeHtml(serviceName) + '</h4>';
+                        if (price > 0) {
+                            html += '<span class="hw-mbo-service-price">£' + price.toFixed(0) + '</span>';
+                        }
+                        html += '</div>';
+                        
+                        // Service details
+                        html += '<div class="hw-mbo-service-details">';
+                        
                         if (duration > 0) {
-                            html += '<br><span class="hw-mbo-duration">(' + duration + ' min)</span>';
+                            html += '<div class="hw-mbo-service-duration"><strong>Duration:</strong> ' + duration + ' minutes</div>';
                         }
-                        html += '</td>';
                         
-                        // Therapist column with photo
-                        html += '<td class="hw-mbo-therapist">';
-                        if (therapistPhoto) {
-                            html += '<div class="hw-mbo-therapist-with-photo">';
-                            html += '<img src="' + escapeHtml(therapistPhoto) + '" alt="' + escapeHtml(therapistName) + '" class="hw-mbo-therapist-photo" />';
-                            html += '<span>' + escapeHtml(therapistName) + '</span>';
+                        if (therapistName) {
+                            html += '<div class="hw-mbo-service-therapist">';
+                            html += '<strong>Therapist:</strong> ';
+                            if (therapistPhoto) {
+                                html += '<span class="hw-mbo-therapist-inline">';
+                                html += '<img src="' + escapeHtml(therapistPhoto) + '" alt="' + escapeHtml(therapistName) + '" class="hw-mbo-therapist-photo-small" />';
+                                html += escapeHtml(therapistName);
+                                html += '</span>';
+                            } else {
+                                html += escapeHtml(therapistName);
+                            }
                             html += '</div>';
-                        } else {
-                            html += escapeHtml(therapistName);
                         }
-                        html += '</td>';
                         
-                        // Service column
-                        html += '<td class="hw-mbo-service">' + escapeHtml(serviceName) + '</td>';
+                        if (description) {
+                            html += '<div class="hw-mbo-service-description">' + escapeHtml(description.substring(0, 150)) + (description.length > 150 ? '...' : '') + '</div>';
+                        }
                         
-                        // Price column
-                        html += '<td class="hw-mbo-price">£' + price.toFixed(0) + '</td>';
+                        html += '</div>';
                         
-                        // Book Now button with dynamic Mindbody link
-                        html += '<td class="hw-mbo-action">';
+                        // Book Now button
+                        html += '<div class="hw-mbo-service-action">';
                         const bookingData = JSON.stringify({
-                            sessionTypeId: slot.SessionTypeId,
-                            staffId: slot.StaffId,
-                            startDateTime: slot.StartDateTime,
+                            serviceId: serviceId,
                             serviceName: serviceName,
                             therapistName: therapistName,
-                            price: price
+                            price: price,
+                            duration: duration
                         });
-                        html += '<button class="hw-mbo-book-btn" data-booking="' + escapeHtml(bookingData) + '">Book Now</button>';
-                        html += '</td>';
+                        html += '<button class="hw-mbo-book-btn hw-mbo-request-booking" data-booking="' + escapeHtml(bookingData) + '">Request Booking</button>';
+                        html += '</div>';
                         
-                        html += '</tr>';
+                        html += '</div>'; // End service card
                     });
                     
-                    html += '</tbody></table></div></div>';
-                });
+                    html += '</div>'; // End services grid
+                    html += '</div>'; // End category section
+                }
                 
                 scheduleContent.innerHTML = html;
                 attachBookingListeners();
@@ -1003,22 +950,70 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 });
             }
             
-            // Handle Book Now button click
+            // Handle Book Now button click - CATALOG MODEL (Request-based)
             function handleBookNow(booking) {
-                if (!booking.sessionTypeId || !booking.startDateTime) {
-                    alert('Booking information is incomplete. Please try again.');
+                if (!booking.serviceId) {
+                    alert('Service information is incomplete. Please try again.');
                     return;
                 }
                 
-                // Generate Mindbody booking link
-                const mbUrl = 'https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp' +
-                    '?sessionTypeId=' + encodeURIComponent(booking.sessionTypeId) +
-                    '&startDateTime=' + encodeURIComponent(booking.startDateTime);
+                // Open modal to collect preferred date
+                if (modalTitle) modalTitle.textContent = 'Request Booking';
+                if (modalBody) {
+                    modalBody.innerHTML = 
+                        '<div class="hw-mbo-modal-details">' +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Service:</div><div class="hw-mbo-modal-value">' + escapeHtml(booking.serviceName) + '</div></div>' +
+                        (booking.therapistName ? '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Therapist:</div><div class="hw-mbo-modal-value">' + escapeHtml(booking.therapistName) + '</div></div>' : '') +
+                        (booking.duration ? '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Duration:</div><div class="hw-mbo-modal-value">' + booking.duration + ' minutes</div></div>' : '') +
+                        '<div class="hw-mbo-modal-row"><div class="hw-mbo-modal-label">Price:</div><div class="hw-mbo-modal-value hw-mbo-price">£' + parseFloat(booking.price).toFixed(2) + '</div></div>' +
+                        '<div class="hw-mbo-modal-row">' +
+                        '<div class="hw-mbo-modal-label">Preferred Date (Optional):</div>' +
+                        '<div class="hw-mbo-modal-value"><input type="date" id="hw-preferred-date" min="' + formatDateLocal(new Date()) + '" /></div>' +
+                        '</div>' +
+                        '<div class="hw-mbo-modal-note">Note: This will redirect you to Mindbody to complete your booking. You can select a specific time there.</div>' +
+                        '</div>' +
+                        '<div class="hw-mbo-modal-action">' +
+                        '<button class="hw-mbo-book-btn hw-mbo-confirm-booking-btn" id="hw-confirm-booking-catalog">Continue to Mindbody</button>' +
+                        '</div>';
+                }
+                if (detailModal) detailModal.classList.add('open');
                 
-                // Open in new window
-                window.open(mbUrl, '_blank', 'noopener,noreferrer');
-                
-                console.log('Booking:', booking);
+                // Attach handler
+                const confirmBtn = document.getElementById('hw-confirm-booking-catalog');
+                if (confirmBtn) {
+                    confirmBtn.addEventListener('click', () => {
+                        const preferredDateInput = document.getElementById('hw-preferred-date');
+                        const preferredDate = preferredDateInput ? preferredDateInput.value : '';
+                        
+                        // Generate Mindbody booking URL with ServiceId
+                        let mbUrl = 'https://clients.mindbodyonline.com/ASP/home_schedule.asp' +
+                            '?studioid=' + encodeURIComponent(defaultLocation || '') +
+                            '&stype=-7' +  // Service booking
+                            '&sTG=23' +    // Treatment category group
+                            '&sView=day' +
+                            '&sLoc=0';
+                        
+                        // Add service ID if available
+                        if (booking.serviceId) {
+                            mbUrl += '&sSer=' + encodeURIComponent(booking.serviceId);
+                        }
+                        
+                        // Add preferred date if selected
+                        if (preferredDate) {
+                            const dateObj = new Date(preferredDate);
+                            mbUrl += '&sDate=' + (dateObj.getMonth() + 1) + '/' + dateObj.getDate() + '/' + dateObj.getFullYear();
+                        }
+                        
+                        console.log('Redirecting to Mindbody:', mbUrl);
+                        console.log('Booking Details:', booking);
+                        
+                        // Open in new window
+                        window.open(mbUrl, '_blank', 'noopener,noreferrer');
+                        
+                        // Close modal
+                        if (detailModal) detailModal.classList.remove('open');
+                    });
+                }
             }
             
             function setupEventListeners() {

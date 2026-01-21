@@ -828,13 +828,16 @@ function hw_mindbody_rest_test_connection( $request ) {
 }
 
 /**
- * REST: Get treatment services with live bookable time slots
+ * REST: Get treatment services CATALOG
  * 
- * NEW ARCHITECTURE:
- * - Calls Mindbody GET /appointment/bookableitems for LIVE availability
- * - Returns Date, Time, TherapistName, StartDateTime for each slot
- * - Supports dynamic date range filtering from frontend
- * - Filters to 8 target treatment categories only
+ * CATALOG-BASED ARCHITECTURE:
+ * - Fetches services via GET /sale/services (service catalog)
+ * - Fetches staff via GET /staff/staff (therapist photos)
+ * - Does NOT fetch live availability (not exposed by this Mindbody account)
+ * - Returns services grouped by 8 target categories
+ * - Frontend displays catalog for user selection
+ * - User selects: Service + Optional Therapist + Preferred Date
+ * - Passes to Mindbody checkout URL
  * 
  * @param WP_REST_Request $request Request object.
  * @return WP_REST_Response|WP_Error
@@ -843,7 +846,11 @@ function hw_mindbody_rest_get_treatment_services( $request ) {
     $api = hw_mindbody_api();
     
     if ( ! $api->is_configured() ) {
-        return new WP_Error( 'not_configured', 'Mindbody API is not configured.', array( 'status' => 500 ) );
+        return new WP_REST_Response( array(
+            'error' => 'API not configured',
+            'message' => 'Mindbody API credentials are not set up.',
+            'services' => array(),
+        ), 200 );
     }
     
     // The 8 target treatment categories
@@ -858,203 +865,133 @@ function hw_mindbody_rest_get_treatment_services( $request ) {
         'Osteopathy & Physiotherapy',
     );
     
-    // Get date range from request (DYNAMIC FETCHING)
-    $start_date = $request->get_param( 'start_date' ) ?: gmdate( 'Y-m-d' );
-    $end_date = $request->get_param( 'end_date' ) ?: gmdate( 'Y-m-d', strtotime( '+7 days' ) );
-    
-    // Validate and format dates (ISO format YYYY-MM-DD)
-    $start_date = gmdate( 'Y-m-d', strtotime( $start_date ) );
-    $end_date = gmdate( 'Y-m-d', strtotime( $end_date ) );
-    
-    // STEP 1: Get session types for appointments
-    $session_types = $api->get_session_types( array( 'Limit' => 500 ) );
-    $session_type_ids = array();
-    $session_type_map = array(); // Map ID to session type data
-    
-    if ( ! is_wp_error( $session_types ) && is_array( $session_types ) ) {
-        foreach ( $session_types as $st ) {
-            $id = $st['Id'] ?? null;
-            $type = strtolower( $st['Type'] ?? '' );
-            $name = $st['Name'] ?? '';
-            
-            if ( $id && ( $type === 'appointment' || strpos( $type, 'appointment' ) !== false ) ) {
-                $session_type_ids[] = $id;
-                $session_type_map[ $id ] = $st;
-            }
-        }
-    }
-    
-    // STEP 2: Get all services to extract category mappings
+    // STEP 1: Get all services from catalog
     $all_services = $api->get_services( array( 'Limit' => 1000 ) );
-    $service_category_map = array(); // SessionTypeId => Category
     
-    if ( ! is_wp_error( $all_services ) && is_array( $all_services ) ) {
-        foreach ( $all_services as $service ) {
-            $session_id = $service['Id'] ?? null;
-            $category = $service['ServiceCategory']['Name'] ?? $service['Program'] ?? '';
-            
-            if ( $session_id && $category ) {
-                // Check if category matches our target categories
-                foreach ( $target_categories as $target ) {
-                    if ( stripos( $category, $target ) !== false || stripos( $target, $category ) !== false ) {
-                        $service_category_map[ $session_id ] = $target;
-                        break;
-                    }
-                }
-            }
-        }
+    if ( is_wp_error( $all_services ) ) {
+        return new WP_REST_Response( array(
+            'error' => 'Failed to fetch services',
+            'message' => $all_services->get_error_message(),
+            'services' => array(),
+        ), 200 );
     }
     
-    // STEP 3: Get staff with photos
+    if ( ! is_array( $all_services ) || empty( $all_services ) ) {
+        return new WP_REST_Response( array(
+            'error' => 'No services found',
+            'message' => 'Your Mindbody account has no services configured.',
+            'services' => array(),
+        ), 200 );
+    }
+    
+    // STEP 2: Get staff with photos
     $staff = $api->get_staff( array( 'Limit' => 500 ) );
-    $staff_map = array(); // StaffId => Staff data
+    $staff_map = array(); // Name => Photo URL
+    $therapist_list = array();
     
     if ( ! is_wp_error( $staff ) && is_array( $staff ) ) {
         foreach ( $staff as $s ) {
+            $name = trim( ( $s['FirstName'] ?? '' ) . ' ' . ( $s['LastName'] ?? '' ) );
+            $photo = $s['ImageUrl'] ?? '';
             $staff_id = $s['Id'] ?? null;
-            if ( $staff_id ) {
-                $staff_map[ $staff_id ] = array(
-                    'Name' => trim( ( $s['FirstName'] ?? '' ) . ' ' . ( $s['LastName'] ?? '' ) ),
-                    'ImageUrl' => $s['ImageUrl'] ?? '',
+            
+            if ( $name ) {
+                $staff_map[ $name ] = $photo;
+                $therapist_list[] = array(
+                    'Id' => $staff_id,
+                    'Name' => $name,
                     'FirstName' => $s['FirstName'] ?? '',
                     'LastName' => $s['LastName'] ?? '',
+                    'ImageUrl' => $photo,
                 );
             }
         }
     }
     
-    // STEP 4: Get bookable items - THE LIVE DATA!
-    $bookable_slots = array();
-    $api_error = null;
-    
-    if ( empty( $session_type_ids ) ) {
-        return new WP_REST_Response( array(
-            'error' => 'No appointment session types found in Mindbody',
-            'message' => 'Your Mindbody account has no session types configured as "Appointment" type. Please check your Mindbody dashboard.',
-            'slots' => array(),
-            'total_count' => 0,
-            'date_range' => array(
-                'start' => $start_date,
-                'end' => $end_date,
-            ),
-        ), 200 );
+    // STEP 3: Process services and organize by category
+    $services_by_category = array();
+    foreach ( $target_categories as $cat ) {
+        $services_by_category[ $cat ] = array();
     }
     
-    $bookable_params = array(
-        'SessionTypeIds' => array_slice( $session_type_ids, 0, 10 ), // Limit to 10 to avoid API timeout
-        'StartDate' => $start_date,
-        'EndDate' => $end_date,
-        'Limit' => 1000,
-    );
+    $total_services = 0;
     
-    $bookable_response = $api->get_bookable_items( $bookable_params );
-    
-    if ( is_wp_error( $bookable_response ) ) {
-        $api_error = $bookable_response->get_error_message();
-        return new WP_REST_Response( array(
-            'error' => 'Mindbody API error',
-            'message' => 'Failed to fetch bookable items from Mindbody: ' . $api_error,
-            'slots' => array(),
-            'total_count' => 0,
-            'date_range' => array(
-                'start' => $start_date,
-                'end' => $end_date,
-            ),
-            'debug' => array(
-                'session_type_count' => count( $session_type_ids ),
-                'requested_session_types' => array_slice( $session_type_ids, 0, 10 ),
-            ),
-        ), 200 );
-    }
-    
-    if ( ! is_array( $bookable_response ) ) {
-        return new WP_REST_Response( array(
-            'error' => 'Invalid response from Mindbody',
-            'message' => 'Expected array of bookable items, got: ' . gettype( $bookable_response ),
-            'slots' => array(),
-            'total_count' => 0,
-            'date_range' => array(
-                'start' => $start_date,
-                'end' => $end_date,
-            ),
-        ), 200 );
-    }
-    
-    foreach ( $bookable_response as $item ) {
-        $session_type_id = $item['SessionType']['Id'] ?? null;
-        $staff_id = $item['Staff']['Id'] ?? null;
-        $start_datetime = $item['StartDateTime'] ?? null;
+    foreach ( $all_services as $service ) {
+        $service_id = $service['Id'] ?? null;
+        $name = $service['Name'] ?? '';
+        $price = floatval( $service['Price'] ?? $service['OnlinePrice'] ?? 0 );
+        $description = $service['Description'] ?? '';
+        $duration = intval( $service['DefaultTimeLength'] ?? 60 );
         
-        if ( ! $session_type_id || ! $start_datetime ) {
+        // Get category
+        $category = $service['ServiceCategory']['Name'] ?? $service['Program'] ?? '';
+        
+        if ( ! $service_id || ! $name ) {
             continue;
         }
         
-        // Check if this session type is in our target categories
-        $category = $service_category_map[ $session_type_id ] ?? null;
-        if ( ! $category ) {
+        // Match to target categories
+        $matched_category = null;
+        foreach ( $target_categories as $target ) {
+            if ( stripos( $category, $target ) !== false || 
+                 stripos( $target, $category ) !== false ||
+                 strtolower( trim( $category ) ) === strtolower( trim( $target ) ) ) {
+                $matched_category = $target;
+                break;
+            }
+        }
+        
+        if ( ! $matched_category ) {
             continue;
         }
         
-        // Extract date and time
-        $datetime_obj = new DateTime( $start_datetime );
-        $date = $datetime_obj->format( 'Y-m-d' );
-        $time = $datetime_obj->format( 'H:i' );
+        // Extract therapist name from service name (if present)
+        // Pattern: "Service Name - Therapist Name - Duration"
+        $therapist_name = null;
+        if ( preg_match( '/\s-\s([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*(?:-|$)/', $name, $matches ) ) {
+            $potential_therapist = trim( $matches[1] );
+            // Exclude duration patterns like "60 min"
+            if ( ! preg_match( '/^\d+\s*min$/i', $potential_therapist ) ) {
+                $therapist_name = $potential_therapist;
+            }
+        }
         
-        // Get staff info
-        $staff_info = $staff_map[ $staff_id ] ?? null;
-        $therapist_name = $staff_info ? $staff_info['Name'] : 'Unknown';
-        $therapist_photo = $staff_info ? $staff_info['ImageUrl'] : '';
+        // Get therapist photo if name matches
+        $therapist_photo = '';
+        if ( $therapist_name && isset( $staff_map[ $therapist_name ] ) ) {
+            $therapist_photo = $staff_map[ $therapist_name ];
+        }
         
-        // Get session type info
-        $session_info = $session_type_map[ $session_type_id ] ?? array();
-        $service_name = $session_info['Name'] ?? 'Appointment';
-        $duration = intval( $session_info['DefaultTimeLength'] ?? 60 );
-        
-        // Build slot object
-        $bookable_slots[] = array(
-            'SessionTypeId' => $session_type_id,
-            'StaffId' => $staff_id,
-            'StartDateTime' => $start_datetime,
-            'Date' => $date,
-            'Time' => $time,
+        // Add to category
+        $services_by_category[ $matched_category ][] = array(
+            'ServiceId' => $service_id,
+            'Name' => $name,
+            'Category' => $matched_category,
+            'Price' => $price,
+            'Duration' => $duration,
+            'Description' => $description,
             'TherapistName' => $therapist_name,
             'TherapistPhoto' => $therapist_photo,
-            'Category' => $category,
-            'Name' => $service_name,
-            'Duration' => $duration,
-            'Price' => floatval( $item['Price'] ?? 0 ),
         );
+        
+        $total_services++;
     }
     
-    // If no slots found, return clear message
-    if ( empty( $bookable_slots ) ) {
-        return new WP_REST_Response( array(
-            'error' => 'No availability found in Mindbody for these dates',
-            'message' => 'No bookable appointments found for ' . $start_date . ' to ' . $end_date . '. Please ensure appointments are scheduled in Mindbody and marked as "Online Bookable".',
-            'slots' => array(),
-            'total_count' => 0,
-            'date_range' => array(
-                'start' => $start_date,
-                'end' => $end_date,
-            ),
-            'debug' => array(
-                'total_api_items' => count( $bookable_response ),
-                'session_type_count' => count( $session_type_ids ),
-                'category_mappings' => count( $service_category_map ),
-            ),
-        ), 200 );
+    // Remove empty categories
+    foreach ( $services_by_category as $cat => $services ) {
+        if ( empty( $services ) ) {
+            unset( $services_by_category[ $cat ] );
+        }
     }
     
     return new WP_REST_Response( array(
         'success' => true,
-        'slots' => $bookable_slots,
-        'total_count' => count( $bookable_slots ),
-        'date_range' => array(
-            'start' => $start_date,
-            'end' => $end_date,
-        ),
-        'target_categories' => $target_categories,
-        'data_source' => 'bookable_items',
+        'model' => 'catalog',
+        'services_by_category' => $services_by_category,
+        'therapists' => $therapist_list,
+        'total_services' => $total_services,
+        'categories' => array_keys( $services_by_category ),
+        'note' => 'This is a service catalog. User selects service + optional therapist + preferred date, then books via Mindbody checkout.',
     ), 200 );
 }
 
