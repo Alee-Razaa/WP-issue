@@ -263,14 +263,17 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 return year + '-' + month + '-' + day;
             }
             
-            // Set default dates - show exactly daysToShow days (today + daysToShow-1)
+            // ROLLING WINDOW: Set default dates to TODAY + 2 DAYS
             const today = new Date();
             today.setHours(12, 0, 0, 0); // Use NOON to avoid any timezone edge cases
             const todayStr = formatDateLocal(today);
             
-            // End date is today + (daysToShow - 1) to show exactly daysToShow days
-            // e.g., daysToShow=3 means: today, tomorrow, day after = 3 days
-            const endDateDefault = new Date(today.getFullYear(), today.getMonth(), today.getDate() + (daysToShow - 1), 12, 0, 0);
+            // End date is always +2 days from today for rolling window
+            const endDateDefault = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 2, 12, 0, 0);
+            
+            console.log('=== INITIAL DATE RANGE (AUTO-LOAD) ===');
+            console.log('Start Date:', todayStr);
+            console.log('End Date (+2 days):', formatDateLocal(endDateDefault));
             
             // FIX v1.3.0: Set min date to today to prevent selecting past dates
             if (filterStartDate) {
@@ -397,32 +400,29 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 
                 const clickedDate = new Date(dateStr + 'T00:00:00');
                 
-                if (isSelectingStart) {
-                    calendarStartDate = clickedDate;
-                    calendarEndDate = null;
-                    isSelectingStart = false;
-                } else {
-                    if (clickedDate < calendarStartDate) {
-                        calendarEndDate = calendarStartDate;
-                        calendarStartDate = clickedDate;
-                    } else {
-                        calendarEndDate = clickedDate;
-                    }
-                    isSelectingStart = true;
-                    
-                    // Close popup after selecting both dates and AUTO-RELOAD results
-                    setTimeout(() => {
-                        if (calendarPopup) calendarPopup.classList.remove('open');
-                        if (dateDisplayTrigger) dateDisplayTrigger.classList.remove('active');
-                        // Auto-reload with new date range
-                        loadAllServices().then(() => loadAvailability());
-                    }, 300);
-                }
+                // ROLLING WINDOW +2 DAY LOGIC
+                calendarStartDate = clickedDate;
                 
-                if (calendarStartDate && calendarEndDate) {
-                    updateDateDisplay();
-                }
+                // Automatically set end date to +2 days from start
+                const endDate = new Date(clickedDate);
+                endDate.setDate(endDate.getDate() + 2);
+                calendarEndDate = endDate;
+                
+                console.log('=== DATE SELECTION ===');
+                console.log('Start Date:', formatDateLocal(calendarStartDate));
+                console.log('End Date (auto +2 days):', formatDateLocal(calendarEndDate));
+                
+                updateDateDisplay();
                 renderCalendars();
+                
+                // Close popup and AUTO-FETCH with new date range
+                setTimeout(() => {
+                    if (calendarPopup) calendarPopup.classList.remove('open');
+                    if (dateDisplayTrigger) dateDisplayTrigger.classList.remove('active');
+                    
+                    console.log('=== AUTO-FETCHING WITH NEW DATE RANGE ===');
+                    loadAllServices().then(() => loadAvailability());
+                }, 300);
             }
             
             // Initialize calendar
@@ -505,49 +505,78 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                 try {
                     // Get current date range from filters
                     const startDate = filterStartDate ? filterStartDate.value : formatDateLocal(new Date());
-                    const endDate = filterEndDate ? filterEndDate.value : formatDateLocal(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+                    const endDate = filterEndDate ? filterEndDate.value : formatDateLocal(new Date(Date.now() + 2 * 24 * 60 * 60 * 1000));
                     
-                    console.log('Fetching bookable slots for range:', startDate, 'to', endDate);
+                    console.log('\n=== FETCHING BOOKABLE SLOTS ===');
+                    console.log('Date Range:', startDate, 'to', endDate);
                     
                     // Fetch LIVE bookable slots with dynamic date range
                     const url = baseUrl + 'treatment-services?start_date=' + encodeURIComponent(startDate) + '&end_date=' + encodeURIComponent(endDate);
                     console.log('API URL:', url);
                     
                     const response = await fetch(url);
-                    console.log('Response status:', response.status);
+                    console.log('Response Status:', response.status, response.statusText);
                     
-                    if (response.ok) {
-                        const data = await response.json();
-                        console.log('API Response:', data);
+                    if (!response.ok) {
+                        const errorText = await response.text();
+                        console.error('❌ API REQUEST FAILED');
+                        console.error('Status:', response.status);
+                        console.error('Response:', errorText);
+                        throw new Error('API returned status ' + response.status);
+                    }
+                    
+                    const data = await response.json();
+                    console.log('✓ API Response received:', data);
+                    
+                    // Check for error in response
+                    if (data.error) {
+                        console.error('❌ API ERROR:', data.error);
+                        console.error('Message:', data.message || 'No details provided');
+                        allServices = [];
+                        if (errorState) {
+                            errorState.textContent = data.error;
+                            errorState.style.display = 'block';
+                        }
+                        return;
+                    }
+                    
+                    // Get slots from response (NEW API structure)
+                    if (data.slots && Array.isArray(data.slots)) {
+                        allServices = data.slots;
                         
-                        // Get slots from response (NEW API structure)
-                        if (data.slots && Array.isArray(data.slots)) {
-                            allServices = data.slots;
-                            
-                            // Build therapist photos lookup
-                            allServices.forEach(slot => {
-                                if (slot.TherapistName && slot.TherapistPhoto) {
-                                    therapistPhotos[slot.TherapistName] = slot.TherapistPhoto;
-                                }
-                            });
-                            
-                            console.log('=== LIVE BOOKABLE SLOTS LOADED ===');
-                            console.log('Total slots: ' + allServices.length);
-                            console.log('Date range: ' + startDate + ' to ' + endDate);
-                            console.log('Data source: ' + (data.data_source || 'unknown'));
-                            console.log('Therapist photos available: ' + Object.keys(therapistPhotos).length);
+                        // Build therapist photos lookup
+                        allServices.forEach(slot => {
+                            if (slot.TherapistName && slot.TherapistPhoto) {
+                                therapistPhotos[slot.TherapistName] = slot.TherapistPhoto;
+                            }
+                        });
+                        
+                        console.log('\n=== ✓ DATA LOADED SUCCESSFULLY ===');
+                        console.log('Total Slots:', allServices.length);
+                        console.log('Date Range:', data.date_range ? (data.date_range.start + ' to ' + data.date_range.end) : (startDate + ' to ' + endDate));
+                        console.log('Data Source:', data.data_source || 'unknown');
+                        console.log('Therapists with Photos:', Object.keys(therapistPhotos).length);
+                        
+                        if (allServices.length > 0) {
+                            console.log('Sample Slot:', allServices[0]);
                         } else {
-                            allServices = [];
-                            console.warn('No slots in API response:', data);
+                            console.warn('⚠️ API returned 0 slots - No appointments available in Mindbody for this date range');
                         }
                     } else {
-                        console.error('API request failed with status:', response.status);
-                        const errorText = await response.text();
-                        console.error('Error response:', errorText);
+                        console.error('❌ UNEXPECTED API STRUCTURE');
+                        console.error('Expected data.slots array, got:', typeof data.slots);
+                        console.error('Full response:', data);
+                        allServices = [];
                     }
                 } catch (e) {
-                    console.error('Failed to load services:', e);
+                    console.error('\n❌ FATAL ERROR in loadAllServices:');
+                    console.error('Error:', e.message);
+                    console.error('Stack:', e.stack);
                     allServices = [];
+                    if (errorState) {
+                        errorState.textContent = 'Failed to connect to booking system. Please try again later.';
+                        errorState.style.display = 'block';
+                    }
                 }
             }
             
@@ -849,9 +878,22 @@ function hw_mindbody_appointments_shortcode( $atts ) {
             
             // NEW RENDERING LOGIC - Displays slots grouped by date
             function renderSlotsSchedule(slots) {
-                if (!scheduleContent) return;
+                console.log('=== RENDER SLOTS SCHEDULE ===');
+                console.log('Data received:', slots);
+                console.log('Total slots to render:', slots.length);
+                
+                if (slots.length > 0) {
+                    console.log('Sample slot structure:', slots[0]);
+                    console.log('Keys in first slot:', Object.keys(slots[0]));
+                }
+                
+                if (!scheduleContent) {
+                    console.error('ERROR: scheduleContent element not found!');
+                    return;
+                }
                 
                 if (slots.length === 0) {
+                    console.warn('No slots to display - showing empty message');
                     scheduleContent.innerHTML = '<div class="hw-mbo-no-results"><h3>No Appointments Available</h3><p>Try adjusting your filters or selecting a different date range.</p></div>';
                     return;
                 }
