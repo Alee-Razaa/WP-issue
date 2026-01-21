@@ -507,10 +507,18 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                     const startDate = filterStartDate ? filterStartDate.value : formatDateLocal(new Date());
                     const endDate = filterEndDate ? filterEndDate.value : formatDateLocal(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
                     
+                    console.log('Fetching bookable slots for range:', startDate, 'to', endDate);
+                    
                     // Fetch LIVE bookable slots with dynamic date range
-                    const response = await fetch(baseUrl + 'treatment-services?start_date=' + encodeURIComponent(startDate) + '&end_date=' + encodeURIComponent(endDate));
+                    const url = baseUrl + 'treatment-services?start_date=' + encodeURIComponent(startDate) + '&end_date=' + encodeURIComponent(endDate);
+                    console.log('API URL:', url);
+                    
+                    const response = await fetch(url);
+                    console.log('Response status:', response.status);
+                    
                     if (response.ok) {
                         const data = await response.json();
+                        console.log('API Response:', data);
                         
                         // Get slots from response (NEW API structure)
                         if (data.slots && Array.isArray(data.slots)) {
@@ -530,11 +538,16 @@ function hw_mindbody_appointments_shortcode( $atts ) {
                             console.log('Therapist photos available: ' + Object.keys(therapistPhotos).length);
                         } else {
                             allServices = [];
-                            console.warn('No slots in API response');
+                            console.warn('No slots in API response:', data);
                         }
+                    } else {
+                        console.error('API request failed with status:', response.status);
+                        const errorText = await response.text();
+                        console.error('Error response:', errorText);
                     }
                 } catch (e) {
                     console.error('Failed to load services:', e);
+                    allServices = [];
                 }
             }
             
